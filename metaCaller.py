@@ -3,7 +3,7 @@ metaCaller
 Authors: Roland Faure, based on a previous program by Minh Tam Truong Khac
 """
 
-__version__ = '0.1.2'
+__version__ = '0.1.3'
 
 import pandas as pd 
 import numpy as np
@@ -200,11 +200,15 @@ def output_VCF_of_this_window(bamfile, ref_file, variantpositions, contig_name, 
            vcf_file: the name of the vcf file
     '''
 
+    if len(variantpositions) == 0:
+        return
+
     #open the output file
     out = open(vcf_file,'a')
 
     #go through the variant positions, grouping positions if they are less than 5bp apart
     index_pos_to_group = 0
+    groups_of_variants = []
     while index_pos_to_group < len(variantpositions):
         start_pos_group = variantpositions[index_pos_to_group]
         end_pos_group = start_pos_group+1
@@ -212,58 +216,74 @@ def output_VCF_of_this_window(bamfile, ref_file, variantpositions, contig_name, 
             end_pos_group = variantpositions[index_pos_to_group+1]+1
             index_pos_to_group += 1
         index_pos_to_group += 1
+        groups_of_variants.append((start_pos_group,end_pos_group))
     
-        #retrieve the reference sequence between these two positions, as well as the two 5bp flanking sequences
+    index_of_variant_group = 0
+    list_of_reads_there = {} #list of the sequence of all the reads in on these positions
+    for pileupcolumn in bamfile.pileup(contig = contig_name,start = variant_positions[0],stop = variant_positions[-1]+1,truncate=True):
+
+        if pileupcolumn.reference_pos < groups_of_variants[index_of_variant_group][0]:
+            continue
+
+        if pileupcolumn.reference_pos == groups_of_variants[index_of_variant_group][0]:
+            #start of the group
+            alleles = {}
+            list_of_reads_there = {}
 
         #go through the reads and inventory the alleles
-        alleles = {}
-        reference_sequence = ref_file.fetch(contig_name,start_pos_group, end_pos_group)
-        if reference_sequence == '':
-            reference_sequence = '.'
+        for pileupread in pileupcolumn.pileups:
+            name_of_read = pileupread.alignment.query_name
+            if pileupread.alignment.query_name not in list_of_reads_there:
+                list_of_reads_there[name_of_read] = ""
+            if not pileupread.is_del:
+                insertion = max(0, pileupread.indel)
+                list_of_reads_there[name_of_read] += pileupread.alignment.query_sequence[pileupread.query_position:pileupread.query_position+1+insertion]
 
-        list_of_reads_there = {}
-        for pileupcolumn in bamfile.pileup(contig = contig_name,start = start_pos_group,stop = end_pos_group,truncate=True):
-            for pileupread in pileupcolumn.pileups:
-                if pileupread.alignment.query_name not in list_of_reads_there:
-                    list_of_reads_there[pileupread.alignment.query_name] = ""
-                if not pileupread.is_del:
-                    insertion = max(0, pileupread.indel)
-                    list_of_reads_there[pileupread.alignment.query_name] += pileupread.alignment.query_sequence[pileupread.query_position:pileupread.query_position+1+insertion]
+        if pileupcolumn.reference_pos == groups_of_variants[index_of_variant_group][1]-1: #exiting the group now, we can output the variants
+            reference_sequence = ref_file.fetch(contig_name,groups_of_variants[index_of_variant_group][0], groups_of_variants[index_of_variant_group][1])
+            if reference_sequence == '':
+                reference_sequence = '.'
 
-        alleles[reference_sequence] = 0
-        for read in list_of_reads_there:
-            if list_of_reads_there[read] not in alleles:
-                alleles[list_of_reads_there[read]] = 1
-            else:
-                alleles[list_of_reads_there[read]] += 1
-        if ''  in alleles:
-            alleles['.'] = alleles['']
-            alleles.pop('')
+            alleles = {}
+            alleles[reference_sequence] = 0
+            for read in list_of_reads_there:
+                if list_of_reads_there[read] not in alleles:
+                    alleles[list_of_reads_there[read]] = 1
+                else:
+                    alleles[list_of_reads_there[read]] += 1
+            if ''  in alleles:
+                alleles['.'] = alleles['']
+                alleles.pop('')
 
+            #write the variants to the vcf file: the ref, the main alt and all the alts that are present in 5 reads or more
+            out.write(contig_name+'\t'+str(groups_of_variants[index_of_variant_group][0]+1)+'\t.\t'+reference_sequence+'\t')
+            #sort the alleles by decreasing order of frequency
+            alleles = {k: v for k, v in sorted(alleles.items(), key=lambda item: item[1], reverse = True)}
+            first_allele = True
+            counts = [alleles[reference_sequence]]
+            count_first_allele = 0
+            for allele in alleles:
+                if allele != reference_sequence:
+                    if first_allele or (alleles[allele] >= 5 and alleles[allele] >= 0.25*count_first_allele):
+                        if not first_allele:
+                            out.write(',')
+                        else :
+                            count_first_allele = alleles[allele]
+                            first_allele = False
+                        out.write(allele)
+                        counts.append(alleles[allele])
+            out.write('\t.\t.\tAD\t')
+            for i in range(len(counts)):
+                if i > 0:
+                    out.write(',')
+                out.write(str(counts[i]))
+            out.write('\n')
 
-        #write the variants to the vcf file: the ref, the main alt and all the alts that are present in 5 reads or more
-        out.write(contig_name+'\t'+str(start_pos_group+1)+'\t.\t'+reference_sequence+'\t')
-        #sort the alleles by decreasing order of frequency
-        alleles = {k: v for k, v in sorted(alleles.items(), key=lambda item: item[1], reverse = True)}
-        first_allele = True
-        counts = [alleles[reference_sequence]]
-        count_first_allele = 0
-        for allele in alleles:
-            if allele != reference_sequence:
-                if first_allele or (alleles[allele] >= 5 and alleles[allele] >= 0.25*count_first_allele):
-                    if not first_allele:
-                        out.write(',')
-                    else :
-                        count_first_allele = alleles[allele]
-                        first_allele = False
-                    out.write(allele)
-                    counts.append(alleles[allele])
-        out.write('\t.\t.\tAD\t')
-        for i in range(len(counts)):
-            if i > 0:
-                out.write(',')
-            out.write(str(counts[i]))
-        out.write('\n')
+            index_of_variant_group += 1
+
+    print("plisduf ")
+    for pileupcolumn in bamfile.pileup(contig = contig_name, start=variant_positions[0], stop=variant_positions[-1], truncate=True):
+        ...
 
     #close the output file
     out.close()
@@ -372,7 +392,6 @@ if __name__ == '__main__':
                 time_get_data = time.time()
                 dict_of_sus_pos, list_of_sus_pos = get_data(bamfile, ref, contig_name,start_pos,start_pos+window, no_snp_threshold)
                 time_get_data2 = time.time() - time_get_data
-                print("Time get_data ", time_get_data2)
             else : 
                 # sol_file.write(f'CONTIG\t{contig_name} {start_pos}<->{contig_length} \n')
 
@@ -398,8 +417,3 @@ if __name__ == '__main__':
                 time_output_vcf2 = time.time() - time_output_vcf
 
             print("Times: get_data ", time_get_data2, " call_variants ", time_call_variants2, " output_vcf ", time_output_vcf2)
-
-
-
-
-    
