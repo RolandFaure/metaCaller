@@ -3,7 +3,7 @@ metaCaller
 Authors: Roland Faure, based on a previous program by Minh Tam Truong Khac
 """
 
-__version__ = '0.1.3'
+__version__ = '0.1.4'
 
 import pandas as pd 
 import numpy as np
@@ -26,8 +26,16 @@ import scipy.stats as stats
 import time
 from argparse import ArgumentParser
 
+def log_comb(n, k):
+    """Compute the logarithm of the combination n choose k. This is useful to avoid numerical errors when n is large"""
+    if n < 1000:
+        return np.log(float(math.comb(n, k)))
+    else:
+        return np.sum(np.log(np.arange(n, n - k, -1))) - np.sum(np.log(np.arange(1, k + 1)))
+
+
 def statistical_test(a,n,b,m,error_rate):
-    return np.exp(np.log(float(math.comb(n, a))) + np.log(float(math.comb(m, b))) + (a * b) * np.log(error_rate))
+    return np.exp(log_comb(n,a) + log_comb(m,b) + (a * b) * np.log(error_rate))
 
 
 def get_data(file, ref_file, contig_name,start_pos,stop_pos, no_snp_threshold = 0.95):
@@ -113,9 +121,8 @@ def call_variants_in_this_window(pileup, list_of_sus_pos):
     matrix_1_0 = np.dot(matrix.T,1-matrix)
     matrix_0_1 = np.dot(1-matrix.T,matrix)
     matrix_0_0 = np.dot(1-matrix.T,1-matrix)
-    pairwise_distance_0 = matrix_0_0/(matrix_0_0+matrix_0_1)
-    pairwise_distance_1 = matrix_1_1/(matrix_1_1+matrix_1_0)
-    print("computed the distances")
+    pairwise_distance_0 = matrix_0_0/(matrix_0_0+0.5*(matrix_0_1+matrix_1_0))
+    pairwise_distance_1 = matrix_1_1/(matrix_1_1+0.5*(matrix_0_1+matrix_1_0))
 
     #now compute the chisquare statistics between all the columns
     pvalues = np.zeros((number_loci,number_loci))
@@ -123,14 +130,13 @@ def call_variants_in_this_window(pileup, list_of_sus_pos):
     for i in range(number_loci):
         pvalues[i,i] = best_pvalue
         for j in range(i+1,number_loci):
-            #if the two columns are not at least 80% similar, dont even bother compute the chisquare, put a 1 in the matrix
-            if pairwise_distance_0[i,j] < 0.9:
+            if pairwise_distance_0[i,j] < 0.9: #if the two columns have not at least 90% similar 0s, dont link them
                 pvalues[i,j] = 1
                 pvalues[j,i] = 1
-            elif pairwise_distance_1[i,j] > 0.9:
+            elif pairwise_distance_1[i,j] > 0.9: #if they have highly similar 0s and highly similar 1s, then link them
                 pvalues[i,j] = best_pvalue
                 pvalues[j,i] = best_pvalue
-            else:
+            else: #this is a bit between the two
                 pvalue = max(min(1,stats.chi2_contingency([[matrix_1_1[i,j],matrix_1_0[i,j]],[matrix_0_1[i,j],matrix_0_0[i,j]]])[1]), best_pvalue)
                 pvalues[i,j] = pvalue
                 pvalues[j,i] = pvalue
@@ -166,12 +172,7 @@ def call_variants_in_this_window(pileup, list_of_sus_pos):
                 emblematic_snps.append(idx[0])
                 for i in idx:
                     validated_snps[i] = True
-                    # if i == 29:
-                    #     print(labels)
-                    #     print(label)
                     # print("I found a rectangle of ", nb_rows_0s, " rows of 0s in a cluster of ", len(idx), " columns, among in total ", number_loci, " columns and ", number_reads, " rows with an error rate of ", error_rate, ", which gives a p-value of ", p_value_of_the_column_cluster)
-                    #     if p_value_of_the_column_cluster < 0.001:
-                    #         #print the submatrix
                     # for i in range(len(idx)):
                     #     for j in range(number_reads):
                     #         print(int(submatrix[j,i]), end = '')
