@@ -1,21 +1,17 @@
 """
-metaCaller
+SNPsnoop
 Authors: Roland Faure, based on a previous program by Minh Tam Truong Khac
 """
 
-__version__ = '0.1.4'
+__version__ = '0.2.0'
 
 import pandas as pd 
 import numpy as np
 import math
 import sys
 import os
-import pysam
-
-import gurobipy as grb
 import pysam as ps
 
-from sklearn.cluster import FeatureAgglomeration
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.impute import KNNImputer
 from sklearn.metrics import pairwise_distances
@@ -25,6 +21,12 @@ import scipy.stats as stats
 
 import time
 from argparse import ArgumentParser
+
+import threading
+from concurrent.futures import ProcessPoolExecutor
+
+fasta_lock = threading.Lock()
+bam_lock = threading.Lock()
 
 def log_comb(n, k):
     """Compute the logarithm of the combination n choose k. This is useful to avoid numerical errors when n is large"""
@@ -38,14 +40,19 @@ def statistical_test(a,n,b,m,error_rate):
     return np.exp(log_comb(n,a) + log_comb(m,b) + (a * b) * np.log(error_rate))
 
 
-def get_data(file, ref_file, contig_name,start_pos,stop_pos, no_snp_threshold = 0.95):
+def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_threshold = 0.95):
     #INPUT: a SORTED and INDEXED Bam file
     # Go through a window w on a contig and select suspicious positions
     #OUTPUT: a binary matrix of reads and columns, where the columns are the positions and the rows are the reads. In the matrix, 1 means the base is the same as the reference, 0 means the base is the main alternative base, and np.nan means the base is not the reference nor the main alternative base
-    itercol = file.pileup(contig = contig_name,start = start_pos,stop = stop_pos,truncate=True,min_base_quality=10)
+    bamfile_ps = ps.AlignmentFile(bamfile,'rb')
+    
+    itercol = bamfile_ps.pileup(contig = contig_name,start = start_pos,stop = stop_pos,truncate=True,min_base_quality=10, multiple_iterators=True)
     matrix = {}
     list_of_suspicious_positions = []
-    reference_sequence = ref_file.fetch(contig_name)
+    
+    ref = ps.FastaFile(originalAssembly)
+    reference_sequence = ref.fetch(contig_name)
+    ref.close()
 
     for pileupcolumn in itercol:
         if pileupcolumn.nsegments >=5:
@@ -97,32 +104,52 @@ def get_data(file, ref_file, contig_name,start_pos,stop_pos, no_snp_threshold = 
                 matrix[pileupcolumn.reference_pos] = tmp_dict
                 list_of_suspicious_positions.append(pileupcolumn.reference_pos)
 
+    bamfile_ps.close()
+
     return matrix, list_of_suspicious_positions
 
-def call_variants_in_this_window(pileup, list_of_sus_pos):
-    '''
-    INPUT: pileup: a matrix of reads and columns
-           row_homogeneity: the minimum homogeneity of the rows to be considered as a cluster
+def find_SNPs_in_this_window(pileup, list_of_sus_pos):
+    """
+    Identify Single Nucleotide Polymorphisms (SNPs) in a given window of genomic data.
 
-    '''
+    Parameters:
+    pileup (numpy.ndarray): A matrix of reads (rows) and loci (columns) representing the genomic data.
+    list_of_sus_pos (list): list_of_sus_pos[col] = position of the column col in the original data.
+
+    Returns:
+    list: A list of validated SNP positions from the input list_of_sus_pos.
+
+    The function performs the following steps:
+    1. Fills missing values in the pileup matrix using K-Nearest Neighbors (KNN) imputation.
+    2. Computes pairwise distances between columns
+    3. Calculates chi-square statistics or proxies to determine the similarity between columns.
+    4. Uses Agglomerative Clustering to group similar columns.
+    5. Validates SNPs based on the statistical test
+    6. Recovers additional SNPs that correlate well with validated SNPs.
+
+    Note:
+    - The function assumes that the input pileup matrix has more than one read and one locus.
+    - The function uses a distance threshold of 0.05 for clustering and a p-value threshold of 0.001 for SNP validation.
+    """
 
     ###Filling the missing values using KNN
     number_reads,number_loci = pileup.shape
     if number_reads>1 and number_loci>1:
         imputer = KNNImputer(n_neighbors=5)
-        matrix = imputer.fit_transform(pileup)
-        matrix[(matrix>=0.5)] = 1
-        matrix[(matrix<0.5)] = 0
+        pileup_filled = imputer.fit_transform(pileup)
+        pileup_filled[(pileup_filled>=0.5)] = 1
+        pileup_filled[(pileup_filled<0.5)] = 0
     else:
-        matrix = pileup  
+        pileup_filled = pileup  
 
     #now compute the pairwise number of 0-0, 0-1, 1-0, 1-1 between all the columns with matrix multiplication
-    matrix_1_1 = np.dot(matrix.T,matrix)
-    matrix_1_0 = np.dot(matrix.T,1-matrix)
-    matrix_0_1 = np.dot(1-matrix.T,matrix)
-    matrix_0_0 = np.dot(1-matrix.T,1-matrix)
-    pairwise_distance_0 = matrix_0_0/(matrix_0_0+0.5*(matrix_0_1+matrix_1_0))
-    pairwise_distance_1 = matrix_1_1/(matrix_1_1+0.5*(matrix_0_1+matrix_1_0))
+    matrix_1_1 = np.dot(pileup_filled.T,pileup_filled)
+    matrix_1_0 = np.dot(pileup_filled.T,1-pileup_filled)
+    matrix_0_1 = np.dot(1-pileup_filled.T,pileup_filled)
+    matrix_0_0 = np.dot(1-pileup_filled.T,1-pileup_filled)
+    epsilon = 1e-10
+    pairwise_distance_0 = matrix_0_0/(matrix_0_0+0.5*(matrix_0_1+matrix_1_0) + epsilon)
+    pairwise_distance_1 = matrix_1_1/(matrix_1_1+0.5*(matrix_0_1+matrix_1_0) + epsilon)
 
     #now compute the chisquare statistics between all the columns
     pvalues = np.zeros((number_loci,number_loci))
@@ -142,8 +169,6 @@ def call_variants_in_this_window(pileup, list_of_sus_pos):
                 pvalues[j,i] = pvalue
                 # print("3 rrrrr", matrix_0_0[i,j],matrix_0_1[i,j],matrix_1_0[i,j],matrix_1_1[i,j], pvalue)
 
-        print("looking at column ", i, "out of ", number_loci, end = '\r')
-
     #now we can perform the clustering using AgglomerativeClustering
     agglo_cl = AgglomerativeClustering(n_clusters=None, metric='precomputed', linkage = 'complete',distance_threshold=0.05)
     agglo_cl.fit(pvalues)
@@ -156,7 +181,7 @@ def call_variants_in_this_window(pileup, list_of_sus_pos):
     for label in np.unique(labels):
         idx = np.where(labels == label)[0]
         if len(idx) > 1:
-            submatrix = matrix[:,idx]
+            submatrix = pileup_filled[:,idx]
             #compute the average value of each row and store it in a vector
             row_means = submatrix.mean(axis = 1)
             #find the number of rows of 0s
@@ -178,7 +203,6 @@ def call_variants_in_this_window(pileup, list_of_sus_pos):
                     #         print(int(submatrix[j,i]), end = '')
                     #     print(' : ', idx[i])
                     # print('')
-    print("Found ", len(emblematic_snps), " clusters of columns")
 
     #as a last step, recover the SNPs which correlate well with validated SNPs, using the already computed pvalues
     for i in emblematic_snps:
@@ -191,15 +215,20 @@ def call_variants_in_this_window(pileup, list_of_sus_pos):
     #return the list of validated snps
     return [list_of_sus_pos[i] for i in range(number_loci) if validated_snps[i]]
 
-def output_VCF_of_this_window(bamfile, ref_file, variantpositions, contig_name, start_pos, stop_pos, vcf_file):
-    '''
-    INPUT: bamfile: the bamfile
-           variantpositions: a list of positions where variants were called
-           contig_name: the name of the contig
-           start_pos: the start position of the window
-           stop_pos: the stop position of the window
-           vcf_file: the name of the vcf file
-    '''
+def output_VCF_of_this_window(bamfile, originalAssembly, variantpositions, contig_name, vcf_file):
+    """
+    Generate a VCF file for a given window of a BAM file.
+    Parameters:
+    bamfile (pysam.AlignmentFile): The BAM file containing the read alignments.
+    ref_file (pysam.FastaFile): The reference genome file.
+    variantpositions (list): A list of positions where variants were called.
+    contig_name (str): The name of the contig.
+    start_pos (int): The start position of the window.
+    stop_pos (int): The stop position of the window.
+    vcf_file (str): The name of the VCF file to write the output.
+    Returns:
+    None
+    """
 
     if len(variantpositions) == 0:
         return
@@ -219,9 +248,11 @@ def output_VCF_of_this_window(bamfile, ref_file, variantpositions, contig_name, 
         index_pos_to_group += 1
         groups_of_variants.append((start_pos_group,end_pos_group))
     
+    bamfile_ps = ps.AlignmentFile(bamfile,'rb')
+    ref_file = ps.FastaFile(originalAssembly)
     index_of_variant_group = 0
     list_of_reads_there = {} #list of the sequence of all the reads in on these positions
-    for pileupcolumn in bamfile.pileup(contig = contig_name,start = variant_positions[0],stop = variant_positions[-1]+1,truncate=True):
+    for pileupcolumn in bamfile_ps.pileup(contig = contig_name,start = variantpositions[0],stop = variantpositions[-1]+1,truncate=True):
 
         if pileupcolumn.reference_pos < groups_of_variants[index_of_variant_group][0]:
             continue
@@ -282,13 +313,54 @@ def output_VCF_of_this_window(bamfile, ref_file, variantpositions, contig_name, 
 
             index_of_variant_group += 1
 
-    print("plisduf ")
-    for pileupcolumn in bamfile.pileup(contig = contig_name, start=variant_positions[0], stop=variant_positions[-1], truncate=True):
-        ...
+    bamfile_ps.close()
+    ref_file.close()
 
     #close the output file
     out.close()
 
+
+def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_threshold, no_snp_threshold, bamfile, ref, vcf_file):
+    """
+    Calls variants on a specified window of a genomic contig. Encapsulates the entire process of variant calling.
+    Parameters:
+    contig_name (str): The name of the contig.
+    start_pos (int): The starting position of the window.
+    end_pos (int): The ending position of the window.
+    filtered_col_threshold (float): The threshold for filtering reads with NaN values.
+    no_snp_threshold (int): If a big proportion of reads in a column have the same base, it is considered as a no SNP position.
+    bamfile (str): The path to the BAM file.
+    ref (str): The reference genome sequence.
+    vcf_file (str): The path to the VCF file where results will be written.
+    Returns:
+    None
+    """
+     
+    list_of_sus_pos = []
+
+    print(f'Parsing data on contig {contig_name} {start_pos}<->{end_pos}')
+    #time get_data
+    time_get_data = time.time()
+    dict_of_sus_pos, list_of_sus_pos = get_data(bamfile, ref, contig_name,start_pos,end_pos, no_snp_threshold)
+    time_get_data2 = time.time() - time_get_data
+
+    ###create a matrix from the columns
+    df = pd.DataFrame(dict_of_sus_pos) 
+    df = df.dropna(axis = 0, thresh = filtered_col_threshold*(len(df.index))) #filter out the reads taht have NaN values in more than 60% of the columns (usually corresponds to the reads that are not spanning the whole window)
+
+    ###clustering
+    if len(dict_of_sus_pos) > 0 :
+        pileup = df.to_numpy()
+        time_call_variants = time.time()
+        variant_positions = find_SNPs_in_this_window(pileup, list_of_sus_pos)
+        time_call_variants2 = time.time() - time_call_variants
+
+        ###append to the vcffile
+        time_output_vcf = time.time()
+        output_VCF_of_this_window(bamfile, ref, variant_positions, contig_name, vcf_file)
+        time_output_vcf2 = time.time() - time_output_vcf
+
+    print("On contig ", contig_name, " from ", start_pos, " to ", end_pos, "Times: get_data ", time_get_data2, " call_variants ", time_call_variants2, " output_vcf ", time_output_vcf2)
 
 def parse_arguments():
     """Parse the input arguments"""
@@ -310,6 +382,11 @@ def parse_arguments():
     )
 
     argparser.add_argument(
+        '-t', '--threads', dest='threads', required=False, default=1, type=int,
+        help='Number of threads to use [1]',
+    )
+
+    argparser.add_argument(
         '--window', dest='window', required=False, default=5000, type=int,
         help='Size of window to perform read separation (must be at least twice shorter than average read length) [5000]',
     )
@@ -317,14 +394,20 @@ def parse_arguments():
     arg = argparser.parse_args()
 
 
-    return arg.bam, arg.out, arg.window, arg.reference
+    return arg.bam, arg.out, arg.window, arg.reference, arg.threads
 
 
 if __name__ == '__main__':
 
     print('metaCaller version ', __version__)
 
-    bamfile, out, window, originalAssembly = parse_arguments()
+    window = 5000
+    no_snp_threshold = 0.95
+    filtered_col_threshold = 0.9
+    min_row_quality = 5
+    min_col_quality = 3
+
+    bamfile, out, window, originalAssembly, num_threads = parse_arguments()
     #mkdir out
     if not os.path.exists(out):
         os.makedirs(out)
@@ -357,64 +440,38 @@ if __name__ == '__main__':
     if not os.path.exists(originalAssembly+'.fai'):
         print('Indexing the reference')
         os.system('samtools faidx '+originalAssembly)
+    ref.close()
 
 
     #start calling variants
     start = time.time()
-    bamfile = ps.AlignmentFile(bamfile,'rb')
-    contigs = (bamfile.header.to_dict())['SQ']
+    bamfile_ps = ps.AlignmentFile(bamfile,'rb')
+    contigs = (bamfile_ps.header.to_dict())['SQ']
     if len(contigs) == 0:
         print('ERROR: No contigs found when parsing the BAM file, check the bam file and the indexation of the bam file')
         sys.exit(1)
+
+    windows_description = [] #list of the windows that will be processed, as tuples (contig_name, start_pos, stop_pos, tmp_vcf_file)
     for num in range(0,len(contigs)):
         contig_name = contigs[num]['SN']
         contig_length = contigs[num]['LN']
-
-        print(contig_name, contig_length, ' length')
-        window = 5000
-        no_snp_threshold = 0.95
-        filtered_col_threshold = 0.9
-        min_row_quality = 5
-        min_col_quality = 3
-        list_of_reads = []
-        index_of_reads = {}
-        haplotypes = []
-        list_of_sus_pos = []
-
         for start_pos in range(0,contig_length,window):
-
-            haplotypes_here = {}
-
             if start_pos+window <= contig_length:
-                # sol_file.write(f'CONTIG\t{contig_name} {start_pos}<->{start_pos+window} \n')
+                windows_description.append((contig_name,start_pos,start_pos+window, out+'/tmp/'+contig_name+'_'+str(start_pos)+'.vcf'))
+            else:
+                windows_description.append((contig_name,start_pos,contig_length, out+'/tmp/'+contig_name+'_'+str(start_pos)+'.vcf'))
 
-                print(f'Parsing data on contig {contig_name} {start_pos}<->{start_pos+window}')
-                #time get_data
-                time_get_data = time.time()
-                dict_of_sus_pos, list_of_sus_pos = get_data(bamfile, ref, contig_name,start_pos,start_pos+window, no_snp_threshold)
-                time_get_data2 = time.time() - time_get_data
-            else : 
-                # sol_file.write(f'CONTIG\t{contig_name} {start_pos}<->{contig_length} \n')
+    bamfile_ps.close() 
 
-                print(f'Parsing data on contig  {contig_name} {start_pos}<->{contig_length}')
-                dict_of_sus_pos, list_of_sus_pos = get_data(bamfile, ref, contig_name,start_pos,contig_length, no_snp_threshold)
+    with ProcessPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(call_variants_on_this_window, window[0], window[1], window[2], filtered_col_threshold, no_snp_threshold, bamfile, originalAssembly, window[3]) for window in windows_description]
+        for future in futures:
+            future.result()
+
+    #concatenate all the vcf files in the order of the windows
+    for window in windows_description:
+        os.system('cat '+window[3]+' >> '+vcf_file)
+        os.remove(window[3])
 
 
-            ###create a matrix from the columns
-            df = pd.DataFrame(dict_of_sus_pos) 
-            df = df.dropna(axis = 0, thresh = filtered_col_threshold*(len(df.index))) #filter out the reads taht have NaN values in more than 60% of the columns (usually corresponds to the reads that are not spanning the whole window)
-            reads = list(df.index)
-
-            ###clustering
-            if len(dict_of_sus_pos) > 0 :
-                pileup = df.to_numpy()
-                time_call_variants = time.time()
-                variant_positions = call_variants_in_this_window(pileup, list_of_sus_pos)
-                time_call_variants2 = time.time() - time_call_variants
-
-                ###append to the vcffile
-                time_output_vcf = time.time()
-                output_VCF_of_this_window(bamfile, ref, variant_positions, contig_name, start_pos, start_pos+window, vcf_file)
-                time_output_vcf2 = time.time() - time_output_vcf
-
-            print("Times: get_data ", time_get_data2, " call_variants ", time_call_variants2, " output_vcf ", time_output_vcf2)
+    
