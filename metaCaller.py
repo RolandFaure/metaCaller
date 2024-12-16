@@ -29,7 +29,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 fasta_lock = threading.Lock()
 bam_lock = threading.Lock()
-
+ 
 def log_comb(n, k):
     """Compute the logarithm of the combination n choose k. This is useful to avoid numerical errors when n is large"""
     if n < 1000:
