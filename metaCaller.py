@@ -3,7 +3,7 @@ SNPsnoop
 Authors: Roland Faure, based on a previous program (strainminer) by Minh Tam Truong Khac
 """
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'
 
 import pandas as pd 
 import numpy as np
@@ -140,7 +140,7 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
             idx_sort = np.argsort(counts)
             counts = counts[idx_sort]
             unique = unique[idx_sort]
-            refbase = reference_sequence[pileupcolumn.reference_pos]
+            refbase = reference_sequence[pileupcolumn.reference_pos].upper()
 
             if len(counts) == 1 or (unique[-1]==refbase and max(4,(1-no_snp_threshold)*pileupcolumn.nsegments) > counts[-2]):
                 continue
@@ -202,13 +202,15 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
 
     return matrices_list, list_of_suspicious_positions_list
 
-def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads):
+def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_on_a_column):
     """
     Identify Single Nucleotide Polymorphisms (SNPs) in a given window of genomic data.
 
     Parameters:
     pileup (numpy.ndarray): A matrix of reads (rows) and loci (columns) representing the genomic data.
     list_of_sus_pos (list): list_of_sus_pos[col] = (position of the column col in the original data).
+    list_of_reads (list): list_of_reads[row] = (name of the read in the row row in the original data).
+    max_error_on_a_column (float): The maximum error rate you can reasonably expect on a column. (sequencing+alignment errors)
 
     Returns:
     list: A map of validated SNP positions -> list_of_reads_with_alt_alleles_at_this_position
@@ -231,7 +233,7 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads):
     pileup_filled = deepcopy(pileup)
 
     if number_reads>1 and number_loci>1:
-        imputer = KNNImputer(n_neighbors=5, copy=False)
+        imputer = KNNImputer(n_neighbors=5, copy=False, keep_empty_features=True)
         pileup_filled = imputer.fit_transform(pileup_filled)
         pileup_filled[(pileup_filled>=0.5)] = 1
         pileup_filled[(pileup_filled<0.5)] = 0
@@ -245,12 +247,12 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads):
     matrix_0_0 = np.dot(1-pileup_filled.T,1-pileup_filled)
 
     epsilon = 1e-10  #to avoid dividing 0 by 0
-    pairwise_distance_0 = matrix_0_0/(matrix_0_0+0.5*(matrix_0_1+matrix_1_0)+epsilon)
-    pairwise_distance_1 = matrix_1_1/(matrix_1_1+0.5*(matrix_0_1+matrix_1_0)+epsilon)
     matrix_0_0 += epsilon
+    pairwise_distance_0 = matrix_0_0/(matrix_0_0+0.5*(matrix_0_1+matrix_1_0))
+    matrix_1_1 += epsilon
+    pairwise_distance_1 = matrix_1_1/(matrix_1_1+0.5*(matrix_0_1+matrix_1_0))
     matrix_0_1 += epsilon
     matrix_1_0 += epsilon
-    matrix_1_1 += epsilon
 
     #now compute the chisquare statistics between all the columns
     pvalues = np.zeros((number_loci,number_loci))
@@ -272,9 +274,12 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads):
 
     #now we can perform the clustering using AgglomerativeClustering
     agglo_cl = AgglomerativeClustering(n_clusters=None, metric='precomputed', linkage = 'complete',distance_threshold=0.05)
-    agglo_cl.fit(pvalues)
+    if len(pvalues) > 1:
+        agglo_cl.fit(pvalues)
+        labels = agglo_cl.labels_
+    elif len(pvalues) == 1:
+        labels = np.array([0])
 
-    labels = agglo_cl.labels_
     emblematic_snps = [] #keep one snp per cluster to compute correlations
 
     #extract each label of size at least two and find the biggest rectangle of 0s in the submatrix
@@ -288,10 +293,11 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads):
             #find the number of rows of 0s
             nb_rows_0s = len(np.where(row_means <= 0.1)[0])
             nb_rows_with_some_0s = len(np.where(row_means <= 0.9)[0])
-            error_rate = min(0.5, nb_rows_with_some_0s/number_reads)
 
-            if nb_rows_with_some_0s < 0.5*number_reads: #then the test will always fail anyway
+            if nb_rows_with_some_0s <= max_error_on_a_column*number_reads and len(idx) == 1: #then the test will always fail anyway
                 continue
+
+            error_rate = max(min(max_error_on_a_column, nb_rows_with_some_0s/number_reads),0.05)
 
             #now perform the statistical test if the obtained rectangle of 0s is significant
             p_value_of_the_column_cluster = statistical_test(nb_rows_0s, number_reads , len(idx), number_loci, error_rate)
@@ -301,18 +307,21 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads):
                 emblematic_snps.append(idx[0])
                 for i in idx:
                     snps_res[list_of_sus_pos[i]] = set([list_of_reads[i] for i in list(np.where(row_means <= 0.1)[0])])
-                    # print("I found a rectangle of ", nb_rows_0s, " rows of 0s in a cluster of ", len(idx), " columns, among in total ", number_loci, " columns and ", number_reads, " rows with an error rate of ", error_rate, ", which gives a p-value of ", p_value_of_the_column_cluster)
-                    # for i in range(len(idx)):
-                    #     for j in range(number_reads):
-                    #         print(int(submatrix[j,i]), end = '')
-                    #     print(' : ', idx[i])
-                    # print('')
+                # print("I found a rectangle of ", nb_rows_0s, " rows of 0s in a cluster of ", len(idx), " columns, among in total ", number_loci, " columns and ", number_reads, " rows with an error rate of ", error_rate, ", which gives a p-value of ", p_value_of_the_column_cluster)
+                # for i in range(len(idx)):
+                #     for j in range(number_reads):
+                #         print(int(submatrix[j,i]), end = '')
+                #     print(' : ', idx[i])
+                # print('')
 
     #as a last step, recover the SNPs which correlate well with validated SNPs, using the already computed pvalues
+
     for i in emblematic_snps:
         for j in range(number_loci):
             if list_of_sus_pos[j] not in snps_res:
                 pvalue = stats.chi2_contingency([[matrix_1_1[i,j],matrix_1_0[i,j]],[matrix_0_1[i,j],matrix_0_0[i,j]]])[1]
+                # if list_of_sus_pos[j] == 94 or list_of_sus_pos[j] == 95:
+                #     print("I am looking at the correlation of the SNP ", list_of_sus_pos[i], " with the SNP ", list_of_sus_pos[j], " which has a p-value of ", pvalue)
                 if pvalue < 0.0001:
                     snps_res[list_of_sus_pos[j]] = set([list_of_reads[alt_row] for alt_row in range(len(pileup)) if pileup_filled[alt_row,j]==0])
 
@@ -334,7 +343,7 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
     """
 
     #open the output file
-    out = open(vcf_file,'a')
+    out = open(vcf_file,'w')
 
     list_of_variants = []
 
@@ -454,7 +463,7 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
     #close the output file
     out.close()
 
-def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_threshold, no_snp_threshold, bamfile, ref, vcf_file):
+def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_threshold, no_snp_threshold, bamfile, ref, vcf_file, max_error_on_column):
     """
     Calls variants on a specified window of a genomic contig. Encapsulates the entire process of variant calling.
     Parameters:
@@ -466,13 +475,14 @@ def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_t
     bamfile (str): The path to the BAM file.
     ref (str): The reference genome sequence.
     vcf_file (str): The path to the VCF file where results will be written.
+    max_error_on_column (float): The maximum error rate you can reasonably expect on a column. (sequencing+alignment errors)
     Returns:
     None
     """
      
     list_of_sus_pos = []
 
-    print(f'Parsing data on contig {contig_name} {start_pos}<->{end_pos}')
+    #print(f'Parsing data on contig {contig_name} {start_pos}<->{end_pos}')
     #time get_data
     time_get_data = time.time()
     list_of_matrices, list_of_list_of_suspicious_positions = get_data(bamfile, ref, contig_name,start_pos,end_pos, no_snp_threshold) #for each window you can have different groups of reads e.g. if some of them align with very big gaps; Here, the lists represent the different groups of reads
@@ -488,18 +498,20 @@ def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_t
 
         ###clustering
         if len(dict_of_sus_pos) > 0 :
-            pileup = df.to_numpy()
+            pileup = df.to_numpy(dtype=float)
             list_of_reads= df.index
             time_call_variants = time.time()
-            variants_here = find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads)
-            time_call_variants2 = time.time() - time_call_variants
-            time_output_vcf2 = 0
+            variants_here = find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_on_column)
+
 
             for pos in variants_here.keys():
                 if pos not in all_variants:
                     all_variants[pos] = variants_here[pos]
                 else:
                     all_variants[pos] = all_variants[pos].union(variants_here[pos])
+
+    time_call_variants2 = time.time() - time_call_variants
+    time_output_vcf2 = 0
 
     ###append to the vcffile
     if len(all_variants) > 0 :
@@ -535,6 +547,11 @@ def parse_arguments():
     )
 
     argparser.add_argument(
+        '-e', '--error_rate', required=False, default=0.1, type=float,
+        help='(Over)estimated error rate of the reads [0.1]',
+    )
+
+    argparser.add_argument(
         '--window', dest='window', required=False, default=5000, type=int,
         help='Size of window to perform read separation (must be at least twice shorter than average read length) [5000]',
     )
@@ -542,12 +559,13 @@ def parse_arguments():
     arg = argparser.parse_args()
 
 
-    return arg.bam, arg.out, arg.window, arg.reference, arg.threads
+    return arg.bam, arg.out, arg.window, arg.reference, arg.threads, arg.error_rate
 
 
 if __name__ == '__main__':
 
     print('metaCaller version ', __version__)
+    time_start = time.time()
 
     window = 5000
     no_snp_threshold = 0.95
@@ -555,10 +573,12 @@ if __name__ == '__main__':
     min_row_quality = 5
     min_col_quality = 3
 
-    bamfile, out, window, originalAssembly, num_threads = parse_arguments()
+    bamfile, out, window, originalAssembly, num_threads, error_rate = parse_arguments()
     #mkdir out
     if not os.path.exists(out):
         os.makedirs(out)
+
+    max_error_rate_on_column = max(0.1,min(error_rate*5, 0.5))
 
     #check that the bam file is indexed, else index it
     if not os.path.exists(bamfile+'.bai'):
@@ -611,12 +631,11 @@ if __name__ == '__main__':
 
     bamfile_ps.close()
 
-
-    # windows_description = [("NC_013353.1", 4835000, 4840000, out+'/tmp/'+"NC_013353.1"+'_'+str(4835000)+'.vcf')] #DEBUGbc
-    # windows_description = [i for i in windows_description if i[1]< 25000]
+    # windows_description = [i for i in windows_description if i[1]< 5000]
+    #windows_description = [("CP075493.1_1", 12320000, 12325000, out+'/tmp/'+"CP075493.1"+'_'+str(70000)+'.vcf')] #DEBUGbc
 
     with ProcessPoolExecutor(max_workers=num_threads) as executor:
-        futures = [executor.submit(call_variants_on_this_window, window[0], window[1], window[2], filtered_col_threshold, no_snp_threshold, bamfile, originalAssembly, window[3]) for window in windows_description]
+        futures = [executor.submit(call_variants_on_this_window, window[0], window[1], window[2], filtered_col_threshold, no_snp_threshold, bamfile, originalAssembly, window[3], max_error_rate_on_column) for window in windows_description]
         for future in futures:
             future.result()
 
@@ -626,5 +645,6 @@ if __name__ == '__main__':
             os.system('cat '+window[3]+' >> '+vcf_file)
             os.remove(window[3])
 
-
+    #print the time now, and the total time taken
+    print("["+time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())+"] Total time taken: ", time.time()-time_start)
     

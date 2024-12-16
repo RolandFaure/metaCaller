@@ -226,6 +226,7 @@ def generate_solution_calls_with_minipileup(solution_genomes, ref_file, tmp_dir,
 
     solution_mapping = tmp_dir + "/solution_mapped.bam"
     command = "minimap2 -a -x asm10 " + ref_file + " " + solution_genomes + " | samtools view -bS - | samtools sort -o " + solution_mapping
+    print("command minipileup: ", command)
     res = os.system(command)
     if res != 0:
         print("minimap failed, ", command)
@@ -288,23 +289,27 @@ def count_number_of_missing_variants(solution_calls, vcf_file):
 
     # count the number of missing variants in the vcf
     missing_variants = []
+    variant_there = 0
     for pos in range(len(variant_presence)):
         if variant_presence[pos]:
             if len(vcf_variant_presence) < pos or not vcf_variant_presence[pos] :
-                print("Missing variant at pos ", pos)
+                # print("Missing variant at pos ", pos)
                 missing_variants.append(pos)
+            else :
+                variant_there += 1
 
     #count the number of false positives in vcf_varaints_presence_conservative
     false_positives = []
     for pos in range(len(vcf_variant_presence_conservative)):
         if vcf_variant_presence_conservative[pos]:
             if len(variant_presence) < pos or not variant_presence[pos]:
-                print("False positive variant at pos ", pos)
+                # print("False positive variant at pos ", pos)
                 false_positives.append(pos)
 
     print("Number of false positives: ", len(false_positives))
 
     print("Number of missing variants: ", len(missing_variants))
+    print("Number of true variants: ", variant_there)
 
     return missing_variants
 
