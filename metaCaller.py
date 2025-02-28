@@ -3,7 +3,7 @@ SNPsnoop
 Authors: Roland Faure, based on a previous program (strainminer) by Minh Tam Truong Khac
 """
 
-__version__ = '0.3.1'
+__version__ = '0.3.2'
 
 import pandas as pd 
 import numpy as np
@@ -38,7 +38,11 @@ def log_comb(n, k):
         return np.sum(np.log(np.arange(n, n - k, -1))) - np.sum(np.log(np.arange(1, k + 1)))
 
 def statistical_test(a,n,b,m,error_rate):
-    return np.exp(log_comb(n,a) + log_comb(m,b) + (a * b) * np.log(error_rate))
+    """Perform a statistical test to determine if a rectangle of 0s in a matrix is significant"""
+    result_log = log_comb(n,a) + log_comb(m,b) + (a * b) * np.log(error_rate)
+    if result_log > 0: #to avoid overflows
+        return 1
+    return np.exp(result_log)
 
 def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_threshold = 0.95):
     """
@@ -62,45 +66,47 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
     breakpoints_left = [stop_pos] #bp with reads left
     breakpoints_right = [start_pos] #bp with reads right
     past_aligned = -1
-    for pileupcolumn in bamfile_ps.pileup(contig=contig_name, start=start_pos, stop=stop_pos, truncate=True, min_base_quality=10, multiple_iterators=True):
+    for pileupcolumn in bamfile_ps.pileup(contig=contig_name, start=start_pos, stop=stop_pos, truncate=True, min_base_quality=0, multiple_iterators=True):
         if past_aligned == -1 :
-            past_aligned = pileupcolumn.get_num_aligned()
-        elif pileupcolumn.get_num_aligned() - past_aligned > max(5, 0.1*pileupcolumn.get_num_aligned()):
+            past_aligned = pileupcolumn.nsegments
+        elif pileupcolumn.nsegments - past_aligned > max(5, 0.1*pileupcolumn.nsegments):
             breakpoints_right.append(pileupcolumn.reference_pos)
-        elif past_aligned - pileupcolumn.get_num_aligned() > max(5, 0.1*pileupcolumn.get_num_aligned()):
+        elif past_aligned - pileupcolumn.nsegments > max(5, 0.1*pileupcolumn.nsegments):
             breakpoints_left.append(pileupcolumn.reference_pos)
-        past_aligned = pileupcolumn.get_num_aligned()
+        past_aligned = pileupcolumn.nsegments
+    
 
     allreads_anywhere_on_the_window = set()
     reads_in_breakpoint_right = [set() for i in breakpoints_right]
     for b, bp_right in enumerate(breakpoints_right) :
-        itercol_first_column = bamfile_ps.pileup(contig = contig_name,start = min(bp_right+10, stop_pos-1),stop = min(bp_right+11, stop_pos),truncate=True,min_base_quality=10, multiple_iterators=True)
+        itercol_first_column = bamfile_ps.pileup(contig = contig_name,start = min(bp_right+10, stop_pos-1),stop = min(bp_right+11, stop_pos),truncate=True,min_base_quality=0, multiple_iterators=True)
         for pileupcolumn in itercol_first_column:
             allreads = pileupcolumn.get_query_names()
             reads_in_breakpoint_right[b] = set(allreads)
             allreads_anywhere_on_the_window = allreads_anywhere_on_the_window.union(set(allreads))
             break
         if bp_right != start_pos:
-            itercol_first_column = bamfile_ps.pileup(contig = contig_name,start = max(bp_right-10, start_pos),stop = max(bp_right-9, start_pos+1),truncate=True,min_base_quality=10, multiple_iterators=True)
+            itercol_first_column = bamfile_ps.pileup(contig = contig_name,start = max(bp_right-10, start_pos),stop = max(bp_right-9, start_pos+1),truncate=True,min_base_quality=0, multiple_iterators=True)
             for pileupcolumn in itercol_first_column:
                 allreads = pileupcolumn.get_query_names()
                 reads_in_breakpoint_right[b] = reads_in_breakpoint_right[b].difference(set(allreads))
                 break
+
     reads_in_breakpoint_left = [set() for i in breakpoints_left]
     for b, bp_left in enumerate(breakpoints_left) :
-        itercol_first_column = bamfile_ps.pileup(contig = contig_name,start = max(bp_left-11, start_pos),stop = max(bp_left-10, start_pos+1),truncate=True,min_base_quality=10, multiple_iterators=True)
+        itercol_first_column = bamfile_ps.pileup(contig = contig_name,start = max(bp_left-11, start_pos),stop = max(bp_left-10, start_pos+1),truncate=True,min_base_quality=0, multiple_iterators=True)
         for pileupcolumn in itercol_first_column:
             allreads = pileupcolumn.get_query_names()
             reads_in_breakpoint_left[b] = set(allreads)
             allreads_anywhere_on_the_window = allreads_anywhere_on_the_window.union(set(allreads))
             break
         if bp_left != stop_pos:
-            itercol_first_column = bamfile_ps.pileup(contig = contig_name,start = min(bp_left+9, stop_pos-1),stop = min(bp_left+10, stop_pos),truncate=True,min_base_quality=10, multiple_iterators=True)
+            itercol_first_column = bamfile_ps.pileup(contig = contig_name,start = min(bp_left+9, stop_pos-1),stop = min(bp_left+10, stop_pos),truncate=True,min_base_quality=0, multiple_iterators=True)
             for pileupcolumn in itercol_first_column:
                 allreads = pileupcolumn.get_query_names()
                 reads_in_breakpoint_left[b] = reads_in_breakpoint_left[b].difference(set(allreads))
                 break
-
+    
     #list all combinations of possible breakpoints (2^len(bp_left)*2^len(bp_right)) and the corresponding intersection of reads
     combination_to_set_of_reads = {} #maps combination of breakpoints ([True, False],[True]) -> set of reads
     for read in allreads_anywhere_on_the_window:
@@ -111,6 +117,7 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
         for i in range(len(breakpoints_right)):
             if read in reads_in_breakpoint_right[i]:
                 combination[1][i] = True
+
         #make sure there is at least one breakpoint on the left and one on the right
         if True in combination[0] and True in combination[1]:
             combination_tuple = (tuple(combination[0]), tuple(combination[1]))
@@ -119,7 +126,7 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
             combination_to_set_of_reads[combination_tuple].add(read)
 
     
-    itercol = bamfile_ps.pileup(contig = contig_name,start = start_pos,stop = stop_pos,truncate=True,min_base_quality=10, multiple_iterators=True)
+    itercol = bamfile_ps.pileup(contig = contig_name,start = start_pos,stop = stop_pos,truncate=True,min_base_quality=0, multiple_iterators=True)
     matrices = {} #map of pileup matrices, one per combination of breakpoints
     list_of_suspicious_positions = {} #map of list of suspicious positions, one per combination of breakpoints
     for i in combination_to_set_of_reads.keys():
@@ -296,7 +303,8 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
 
             if nb_rows_with_some_0s <= max_error_on_a_column*number_reads and len(idx) == 1: #then the test will always fail anyway
                 continue
-
+            if number_reads==0:
+                continue 
             error_rate = max(min(max_error_on_a_column, nb_rows_with_some_0s/number_reads),0.05)
 
             #now perform the statistical test if the obtained rectangle of 0s is significant
@@ -307,12 +315,16 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
                 emblematic_snps.append(idx[0])
                 for i in idx:
                     snps_res[list_of_sus_pos[i]] = set([list_of_reads[i] for i in list(np.where(row_means <= 0.1)[0])])
+                
                 # print("I found a rectangle of ", nb_rows_0s, " rows of 0s in a cluster of ", len(idx), " columns, among in total ", number_loci, " columns and ", number_reads, " rows with an error rate of ", error_rate, ", which gives a p-value of ", p_value_of_the_column_cluster)
                 # for i in range(len(idx)):
                 #     for j in range(number_reads):
                 #         print(int(submatrix[j,i]), end = '')
                 #     print(' : ', idx[i])
                 # print('')
+
+                # print("position ", list_of_sus_pos[i], " and reads ", set([list_of_reads[i] for i in list(np.where(row_means <= 0.1)[0])]))
+
 
     #as a last step, recover the SNPs which correlate well with validated SNPs, using the already computed pvalues
 
@@ -368,13 +380,12 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
 
         interesting_reads = set()
 
-
     
     bamfile_ps = ps.AlignmentFile(bamfile,'rb')
     ref_file = ps.FastaFile(originalAssembly)
     index_of_variant_group = 0
     list_of_reads_there = {} #list of the sequence of all the reads in on these positions
-    for pileupcolumn in bamfile_ps.pileup(contig = contig_name, start = variantpositions[0], stop = variantpositions[-1]+1,truncate=True):
+    for pileupcolumn in bamfile_ps.pileup(contig = contig_name, start = variantpositions[0], stop = variantpositions[-1]+1,truncate=True, min_base_quality=0):
 
         if pileupcolumn.reference_pos < groups_of_variants[index_of_variant_group][0]:
             continue
@@ -395,6 +406,7 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
                     list_of_reads_there[name_of_read] += pileupread.alignment.query_sequence[pileupread.query_position:pileupread.query_position+1+insertion]
 
         if pileupcolumn.reference_pos == groups_of_variants[index_of_variant_group][1]-1: #exiting the group now, we can output the variants
+            
             reference_sequence = ref_file.fetch(contig_name,groups_of_variants[index_of_variant_group][0], groups_of_variants[index_of_variant_group][1])
             if reference_sequence == '':
                 reference_sequence = '.'
@@ -424,7 +436,7 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
                 if first_allele:
                     count_first_allele = alleles[al]
                     first_allele = False
-                if alleles[al] >= 5 and alleles[al] >= 0.25*count_first_allele :
+                elif alleles[al] >= 5 and alleles[al] >= 0.25*count_first_allele :
                     for al2 in alleles :
                         if alleles[al2] >= 5:
 
@@ -435,6 +447,7 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
 
             for i in to_pop:
                 alleles.pop(i)
+
 
             first_allele = True
             counts = []
@@ -489,6 +502,7 @@ def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_t
     time_get_data2 = time.time() - time_get_data
 
     all_variants = {} #map of position -> set of reads with alt alleles
+    time_call_variants = time.time()
 
     for dict_of_sus_pos, list_of_sus_pos in zip(list_of_matrices, list_of_list_of_suspicious_positions):
 
@@ -502,7 +516,6 @@ def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_t
             list_of_reads= df.index
             time_call_variants = time.time()
             variants_here = find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_on_column)
-
 
             for pos in variants_here.keys():
                 if pos not in all_variants:
@@ -565,6 +578,7 @@ def parse_arguments():
 if __name__ == '__main__':
 
     print('metaCaller version ', __version__)
+    print(" ".join(sys.argv))
     time_start = time.time()
 
     window = 5000
@@ -633,7 +647,6 @@ if __name__ == '__main__':
 
     # windows_description = [i for i in windows_description if i[1]< 5000]
     #windows_description = [("CP075493.1_1", 12320000, 12325000, out+'/tmp/'+"CP075493.1"+'_'+str(70000)+'.vcf')] #DEBUGbc
-
     with ProcessPoolExecutor(max_workers=num_threads) as executor:
         futures = [executor.submit(call_variants_on_this_window, window[0], window[1], window[2], filtered_col_threshold, no_snp_threshold, bamfile, originalAssembly, window[3], max_error_rate_on_column) for window in windows_description]
         for future in futures:

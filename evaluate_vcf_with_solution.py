@@ -236,7 +236,7 @@ def generate_solution_calls_with_minipileup(solution_genomes, ref_file, tmp_dir,
     res = os.system(command)
 
     #minipileup has a command that looks like this: /home/rfaure/Documents/software/minipileup/minipileup -f one_strain.fa -c refs_mapped.bam
-    command = "/home/rfaure/Documents/software/minipileup/minipileup -f " + ref_file + " -c " + solution_mapping + " > " + solution_calls
+    command = "minipileup -f " + ref_file + " -c " + solution_mapping + " > " + solution_calls
     res = os.system(command)
     if res != 0:
         print("minipileup failed, ", command)
@@ -306,9 +306,9 @@ def count_number_of_missing_variants(solution_calls, vcf_file):
                 # print("False positive variant at pos ", pos)
                 false_positives.append(pos)
 
-    print("Number of false positives: ", len(false_positives))
+    print("Precision: ", 1-len(false_positives)/(len(false_positives)+variant_there))
 
-    print("Number of missing variants: ", len(missing_variants))
+    print("Recall: ", 1-len(missing_variants)/(len(missing_variants)+variant_there))
     print("Number of true variants: ", variant_there)
 
     return missing_variants
