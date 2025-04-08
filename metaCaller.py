@@ -657,13 +657,7 @@ if __name__ == '__main__':
     for num in range(0,len(contigs)):
         contig_name = contigs[num]['SN']
         contig_length = contigs[num]['LN']
-        if contig_name != "CP075492.1_3":
-            print("DEUBG shki ", contig_name)
-            continue
         for start_pos in range(0,contig_length,window):
-            if start_pos > 5000:
-                print("sksksisi DEBUG")
-                break
             if start_pos+window <= contig_length:
                 windows_description.append((contig_name,start_pos,start_pos+window, out+'/tmp/'+contig_name+'_'+str(start_pos)+'.vcf'))
             else:
