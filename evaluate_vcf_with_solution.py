@@ -86,6 +86,8 @@ def output_all_potential_kmers_represented_by_the_VCF(vcffile, reffile, outfile,
 
         masked_positions[contig] = [(number_of_variants_around[i] > 10) for i in range(len(ref_seqs[contig]))]
 
+    print("All variants indexed")
+
 
     #output for each variants all the possible 2*l mers surrounding the variant
     fo = open(outfile, "w")
@@ -99,7 +101,7 @@ def output_all_potential_kmers_represented_by_the_VCF(vcffile, reffile, outfile,
             if masked_positions[contig][pos]: #this is to avoid to output too many sequences, even though we lose some information
                 continue
             #now list all the extensions right
-            print("computing ext for pos ", pos, end='\r')
+            print("computing ext for pos ", pos, " on contig ", contig, end='\r')
             extensions_right = [("", pos+1)] #extensions are a pair (seq, pos_on_ref)
             go_on = True
             while go_on:
@@ -136,12 +138,17 @@ def output_all_potential_kmers_represented_by_the_VCF(vcffile, reffile, outfile,
                 continue
             for variant in variants[(contig, variant_pos)]:
                 index_seq_for_this_snp = 0
+                print("len ", extensions_of_every_base_left[variant_pos], " ", extensions_of_every_base_right[variant_pos+len(variant[0])-1])
                 for left_ext in extensions_of_every_base_left[variant_pos]:
                     for right_ext in extensions_of_every_base_right[variant_pos+len(variant[0])-1]:
                         fo.write(">"+contig+"$"+str(variant_pos)+"$"+variant[0]+"$"+variant[1]+"$" + str(index_seq_for_this_snp) +"\n")
                         fo.write(left_ext+variant[1]+right_ext+"\n")
                         index_seq_for_this_snp+=1
+                fo.write(">"+contig+"$"+str(variant_pos)+"$"+variant[0]+"$REF\n")
+                fo.write(left_ext+ variant[0] +right_ext+"\n")
                 index_snp +=1
+                sys.exit()
+
 
     print("We could not output ", nb_variants_we_cannot_output, " variants because there were too many variants around")
     print("We could output ", index_snp, " variants")
@@ -328,9 +335,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate VCF with solution")
     parser.add_argument("-v", "--vcf", required=True, help="Path to the input VCF file containing variant information")
     parser.add_argument("-r", "--ref", required=True, help="Path to the reference genome file in FASTA format")
-    parser.add_argument("-s", "--solution", required=True, help="Path to the solution file")
+    # parser.add_argument("-s", "--solution", required=True, help="Path to the solution file")
     parser.add_argument("-l", "--length", type=int, default=15, help="Length of the k-mers to be generated on each side of the variant (default: 15)")
-    parser.add_argument("-o", "--output", required=True, help="Path to the output file where the results will be written (default: output.txt)")
+    parser.add_argument("-o", "--output", required=True, help="Path to the output file where the output kmers will be written")
 
     args = parser.parse_args()
 
@@ -340,14 +347,14 @@ if __name__ == "__main__":
     except FileExistsError:
         pass
 
-    # nb_of_variants_we_cannot_output = output_all_potential_kmers_represented_by_the_VCF(args.vcf, args.ref, os.path.join(tmp_dir, "all_seqs_to_test.fa"), args.length)
+    nb_of_variants_we_cannot_output = output_all_potential_kmers_represented_by_the_VCF(args.vcf, args.ref, args.output, args.length)
     # map_the_potential_kmers_to_the_reference(os.path.join(tmp_dir, "all_seqs_to_test.fa"), args.solution, os.path.join(tmp_dir, "mapped.txt"), tmp_dir)
     # classify_the_variants(os.path.join(tmp_dir, "mapped.txt"), args.output)
     # print("Did not test ", nb_of_variants_we_cannot_output, " variants because there were too many variants around")
 
-    solution_calls = os.path.join(tmp_dir, "solution.vcf")
-    generate_solution_calls_with_minipileup(args.solution, args.ref, tmp_dir, solution_calls)
-    missing_variants = count_number_of_missing_variants(solution_calls, args.vcf)
+    # solution_calls = os.path.join(tmp_dir, "solution.vcf")
+    # generate_solution_calls_with_minipileup(args.solution, args.ref, tmp_dir, solution_calls)
+    # missing_variants = count_number_of_missing_variants(solution_calls, args.vcf)
 
 
 

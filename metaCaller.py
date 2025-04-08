@@ -3,7 +3,7 @@ SNPsnoop
 Authors: Roland Faure, based on a previous program (strainminer) by Minh Tam Truong Khac
 """
 
-__version__ = '0.3.2'
+__version__ = '0.3.4'
 
 import pandas as pd 
 import numpy as np
@@ -234,7 +234,7 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
     - The function assumes that the input pileup matrix has more than one read and one locus.
     - The function uses a distance threshold of 0.05 for clustering and a p-value threshold of 0.001 for SNP validation.
     """
-
+    
     ###Filling the missing values using KNN
     number_reads,number_loci = pileup.shape
     pileup_filled = deepcopy(pileup)
@@ -267,10 +267,10 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
     for i in range(number_loci):
         pvalues[i,i] = best_pvalue
         for j in range(i+1,number_loci):
-            if pairwise_distance_0[i,j] < 0.9: #if the two columns have not at least 90% similar 0s, dont link them
+            if matrix_1_1[i,j] > matrix_0_0[i,j] and pairwise_distance_0[i,j] < 0.9: #if the two columns have not at least 90% similar 0s, dont link them
                 pvalues[i,j] = 1
                 pvalues[j,i] = 1
-            elif pairwise_distance_1[i,j] > 0.9: #if they have highly similar 0s and highly similar 1s, then link them
+            elif pairwise_distance_0[i,j] > 0.9 and pairwise_distance_1[i,j] > 0.9: #if they have highly similar 0s and highly similar 1s, then link them
                 pvalues[i,j] = best_pvalue
                 pvalues[j,i] = best_pvalue
             else: #this is a bit between the two
@@ -332,10 +332,18 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
         for j in range(number_loci):
             if list_of_sus_pos[j] not in snps_res:
                 pvalue = stats.chi2_contingency([[matrix_1_1[i,j],matrix_1_0[i,j]],[matrix_0_1[i,j],matrix_0_0[i,j]]])[1]
-                # if list_of_sus_pos[j] == 94 or list_of_sus_pos[j] == 95:
+                # if list_of_sus_pos[j] == 793 or list_of_sus_pos[j] == 793:
                 #     print("I am looking at the correlation of the SNP ", list_of_sus_pos[i], " with the SNP ", list_of_sus_pos[j], " which has a p-value of ", pvalue)
                 if pvalue < 0.0001:
                     snps_res[list_of_sus_pos[j]] = set([list_of_reads[alt_row] for alt_row in range(len(pileup)) if pileup_filled[alt_row,j]==0])
+
+    # Perform a simple pileup call for SNPs with near 100% alternative bases, which are not called by the above procedure
+    for col in range(number_loci):
+        alt_count = np.sum(pileup[:, col] == 0)  # Count of alternative bases (0s)
+        total_count = np.sum(~np.isnan(pileup[:, col]))  # Total count of non-NaN values
+        if total_count > 10 and alt_count / total_count >= 0.5:  # Check if alternative bases are dominant
+            if list_of_sus_pos[col] not in snps_res:
+                snps_res[list_of_sus_pos[col]] = set([list_of_reads[row] for row in range(len(pileup)) if pileup[row, col] == 0])
 
     #return the list of validated snps
     return snps_res
@@ -426,8 +434,10 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
             out.write(contig_name+'\t'+str(groups_of_variants[index_of_variant_group][0]+1)+'\t.\t'+reference_sequence+'\t')
             #sort the alleles by decreasing order of frequency
             alleles = {k: v for k, v in sorted(alleles.items(), key=lambda item: item[1], reverse = True)}
+            if 1308 <= groups_of_variants[index_of_variant_group][0] <= 1314:
+                print(f"Position: {groups_of_variants[index_of_variant_group][0]}, Alleles: {alleles}")
 
-            #delete the rarest alleles that are included in more frequent alleles: these are often artefacts of homopolymer errors
+            #delete the rarest alleles that are included in more frequent alleles: these are often artefacts of homopolymer errors. Also delete if not frequent enough
             to_pop = set()
             first_allele = True
             count_first_allele = 0
@@ -436,7 +446,7 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
                 if first_allele:
                     count_first_allele = alleles[al]
                     first_allele = False
-                elif alleles[al] >= 5 and alleles[al] >= 0.25*count_first_allele :
+                elif alleles[al] >= 15 and alleles[al] >= 0.25*count_first_allele :
                     for al2 in alleles :
                         if alleles[al2] >= 5:
 
@@ -447,6 +457,8 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
 
             for i in to_pop:
                 alleles.pop(i)
+
+
 
 
             first_allele = True
@@ -598,6 +610,11 @@ if __name__ == '__main__':
     if not os.path.exists(bamfile+'.bai'):
         print('Indexing the bam file')
         os.system('samtools index '+bamfile)
+
+    # Read all the contigs that exist in the BAM file
+    bamfile_ps = ps.AlignmentFile(bamfile, 'rb')
+    contigs = bamfile_ps.header['SQ']
+    bamfile_ps.close()
     
     #mkdir out/tmp
     if not os.path.exists(out+'/tmp'):
@@ -613,7 +630,10 @@ if __name__ == '__main__':
     o.write('##fileformat=VCFv4.2\n')
     o.write('##source=metaCaller\n')
     o.write('##reference='+originalAssembly+'\n')
-    o.write('##INFO=<ID=AD,Number=A,Type=Integer,Description="Allelic depths for the ref and alt alleles in the order listed">\n')
+    for contig in contigs:
+        o.write(f"##contig=<ID={contig['SN']},length={contig['LN']}>\n")
+    o.write('##INFO=<ID=AD,Number=.,Type=Integer,Description="Allelic depths for the ref and alt alleles in the order listed">\n')
+
     o.write('#CHROM\tPOS\tID\tREF\tALT\tQUAL\tINFO\tFILTER\n')
     o.close()
 
@@ -637,7 +657,13 @@ if __name__ == '__main__':
     for num in range(0,len(contigs)):
         contig_name = contigs[num]['SN']
         contig_length = contigs[num]['LN']
+        if contig_name != "CP075492.1_3":
+            print("DEUBG shki ", contig_name)
+            continue
         for start_pos in range(0,contig_length,window):
+            if start_pos > 5000:
+                print("sksksisi DEBUG")
+                break
             if start_pos+window <= contig_length:
                 windows_description.append((contig_name,start_pos,start_pos+window, out+'/tmp/'+contig_name+'_'+str(start_pos)+'.vcf'))
             else:
