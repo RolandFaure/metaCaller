@@ -3,7 +3,7 @@ SNPsnoop
 Authors: Roland Faure, based on a previous program (strainminer) by Minh Tam Truong Khac
 """
 
-__version__ = '0.3.4'
+__version__ = '0.3.5'
 
 import pandas as pd 
 import numpy as np
@@ -138,7 +138,7 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
     ref.close()
 
     for pileupcolumn in itercol:
-        if pileupcolumn.nsegments >=5:
+        if pileupcolumn.nsegments >=1:#filter on the coverage
 
             allreads = pileupcolumn.get_query_names()
             allbases_raw = [i.upper() for i in pileupcolumn.get_query_sequences(add_indels=True)]
@@ -149,7 +149,7 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
             unique = unique[idx_sort]
             refbase = reference_sequence[pileupcolumn.reference_pos].upper()
 
-            if len(counts) == 1 or (unique[-1]==refbase and max(4,(1-no_snp_threshold)*pileupcolumn.nsegments) > counts[-2]):
+            if len(counts) == 1 or (unique[-1]==refbase and max(2,(1-no_snp_threshold)*pileupcolumn.nsegments) > counts[-2]):
                 continue
 
             #to obtain allbases2, convert allbases_raw: output only the A,C,G,T and *, forget the + and - and the following number
@@ -341,7 +341,9 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
     for col in range(number_loci):
         alt_count = np.sum(pileup[:, col] == 0)  # Count of alternative bases (0s)
         total_count = np.sum(~np.isnan(pileup[:, col]))  # Total count of non-NaN values
-        if total_count > 10 and alt_count / total_count >= 0.5:  # Check if alternative bases are dominant
+        if alt_count / total_count > 0.5 and alt_count >= 2:  # Check if alternative bases are dominant
+            # print(f"Debug: SNP at position {list_of_sus_pos[col]} with {alt_count} alternative bases out of {total_count} total bases.")
+            # print(f"Pileup: {pileup[:, col]}")
             if list_of_sus_pos[col] not in snps_res:
                 snps_res[list_of_sus_pos[col]] = set([list_of_reads[row] for row in range(len(pileup)) if pileup[row, col] == 0])
 
@@ -434,8 +436,8 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
             out.write(contig_name+'\t'+str(groups_of_variants[index_of_variant_group][0]+1)+'\t.\t'+reference_sequence+'\t')
             #sort the alleles by decreasing order of frequency
             alleles = {k: v for k, v in sorted(alleles.items(), key=lambda item: item[1], reverse = True)}
-            if 1308 <= groups_of_variants[index_of_variant_group][0] <= 1314:
-                print(f"Position: {groups_of_variants[index_of_variant_group][0]}, Alleles: {alleles}")
+            # if 1308 <= groups_of_variants[index_of_variant_group][0] <= 1314:
+            #     print(f"Position: {groups_of_variants[index_of_variant_group][0]}, Alleles: {alleles}")
 
             #delete the rarest alleles that are included in more frequent alleles: these are often artefacts of homopolymer errors. Also delete if not frequent enough
             to_pop = set()
@@ -457,9 +459,6 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
 
             for i in to_pop:
                 alleles.pop(i)
-
-
-
 
             first_allele = True
             counts = []
@@ -542,8 +541,7 @@ def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_t
     if len(all_variants) > 0 :
         time_output_vcf = time.time()
         output_VCF_of_this_window(bamfile, ref, all_variants, contig_name, vcf_file)
-        time_output_vcf2 = time.time() - time_output_vcf
-    
+        time_output_vcf2 = time.time() - time_output_vcf 
 
     print("On contig ", contig_name, " from ", start_pos, " to ", end_pos, "Times: get_data ", time_get_data2, " call_variants ", time_call_variants2, " output_vcf ", time_output_vcf2)
 
@@ -577,8 +575,8 @@ def parse_arguments():
     )
 
     argparser.add_argument(
-        '--window', dest='window', required=False, default=5000, type=int,
-        help='Size of window to perform read separation (must be at least twice shorter than average read length) [5000]',
+        '--window', dest='window', required=False, default=0, type=int,
+        help='Size of window to perform read separation. Must be at least twice shorter than average read length. 0 for auto [0]',
     )
 
     arg = argparser.parse_args()
@@ -593,7 +591,7 @@ if __name__ == '__main__':
     print(" ".join(sys.argv))
     time_start = time.time()
 
-    window = 5000
+    window = 0
     no_snp_threshold = 0.95
     filtered_col_threshold = 0.9
     min_row_quality = 5
@@ -657,9 +655,22 @@ if __name__ == '__main__':
     for num in range(0,len(contigs)):
         contig_name = contigs[num]['SN']
         contig_length = contigs[num]['LN']
-        for start_pos in range(0,contig_length,window):
-            if start_pos+window <= contig_length:
-                windows_description.append((contig_name,start_pos,start_pos+window, out+'/tmp/'+contig_name+'_'+str(start_pos)+'.vcf'))
+        window_here = window
+        if window == 0:
+            average_read_length = 0
+            read_count = 0
+            for read in bamfile_ps.fetch(contig_name):
+                average_read_length += read.query_length
+                read_count += 1
+
+            if read_count > 0:
+                average_read_length //= read_count
+            else:
+                average_read_length = 200  # Default to 100 if no reads are found, we dont care anyway
+            window_here = min(10000,max(200, average_read_length // 2))  # Ensure a window size between 200 and 10000
+        for start_pos in range(0,contig_length,window_here):
+            if start_pos+window_here <= contig_length:
+                windows_description.append((contig_name,start_pos,start_pos+window_here, out+'/tmp/'+contig_name+'_'+str(start_pos)+'.vcf'))
             else:
                 windows_description.append((contig_name,start_pos,contig_length, out+'/tmp/'+contig_name+'_'+str(start_pos)+'.vcf'))
 

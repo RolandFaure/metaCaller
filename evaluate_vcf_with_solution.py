@@ -3,6 +3,7 @@
 import sys
 import argparse
 import os
+from copy import deepcopy
 import matplotlib.pyplot as plt
 
 
@@ -133,21 +134,20 @@ def output_all_potential_kmers_represented_by_the_VCF(vcffile, reffile, outfile,
             if masked_positions[contig][variant_pos] or (variant_pos>l and masked_positions[contig][variant_pos-l]) or (variant_pos+l < len(ref_seqs[contig]) and masked_positions[contig][variant_pos+l]):
                 nb_variants_we_cannot_output += 1
                 # print("We cannot output variant at pos ", variant_pos, " because there are too many variants around")
-                fo.write(">"+contig+"$"+str(variant_pos)+"$"+variant[0]+"$"+variant[1]+"$-1\n")
-                fo.write("NNNNN\n")
+                # fo.write(">"+contig+"$"+str(variant_pos+1)+"$"+variant[0]+"$"+variant[1]+"$-1\n")
+                # fo.write("NNNNN\n")
                 continue
             for variant in variants[(contig, variant_pos)]:
                 index_seq_for_this_snp = 0
-                print("len ", extensions_of_every_base_left[variant_pos], " ", extensions_of_every_base_right[variant_pos+len(variant[0])-1])
+                # print("len ", extensions_of_every_base_left[variant_pos], " ", extensions_of_every_base_right[variant_pos+len(variant[0])-1])
                 for left_ext in extensions_of_every_base_left[variant_pos]:
                     for right_ext in extensions_of_every_base_right[variant_pos+len(variant[0])-1]:
-                        fo.write(">"+contig+"$"+str(variant_pos)+"$"+variant[0]+"$"+variant[1]+"$" + str(index_seq_for_this_snp) +"\n")
+                        fo.write(">"+contig+"$"+str(variant_pos+1)+"$"+variant[0]+"$"+variant[1]+"$" + str(index_seq_for_this_snp) +"\n")
                         fo.write(left_ext+variant[1]+right_ext+"\n")
                         index_seq_for_this_snp+=1
-                fo.write(">"+contig+"$"+str(variant_pos)+"$"+variant[0]+"$REF\n")
+                fo.write(">"+contig+"$"+str(variant_pos+1)+"$"+variant[0]+"$REF\n")
                 fo.write(left_ext+ variant[0] +right_ext+"\n")
                 index_snp +=1
-                sys.exit()
 
 
     print("We could not output ", nb_variants_we_cannot_output, " variants because there were too many variants around")
@@ -320,24 +320,169 @@ def count_number_of_missing_variants(solution_calls, vcf_file):
 
     return missing_variants
 
+def map_hifi_reads_on_the_kmers_to_check(kmers_to_check_fa, vcf_file, read_file, output_vcf, l):
+
+    # Inventory variants in a dictionary
+    variant_dict = {}  # Keys: (chrom, pos, ref), Values: {alt_allele: count}
+    with open(vcf_file) as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            ls = line.strip().split()
+            chrom = ls[0]
+            pos = int(ls[1])
+            ref = ls[3]
+            alt_alleles = ls[4]
+            for alt in alt_alleles:
+                key = (chrom, pos, ref)
+                if key not in variant_dict:
+                    variant_dict[key] = {}
+                    variant_dict[key][ref] = 0
+                variant_dict[key][alt] = 0
+
+    # Create another variant_dict for non-uniquely mapped reads
+    ambiguous_variant_dict = deepcopy(variant_dict)
+
+    # Index the k-mers using bwa
+    # command = f"bwa index {kmers_to_check_fa}"
+    # res_idx = os.system(command)
+    # if res_idx != 0:
+    #     print("Indexing k-mers failed:", command)
+    #     sys.exit(1)
+    # print("K-mers indexed!")
+
+    # Map the reads to the k-mers using bwa fastmap
+    mapped_reads_file = "reads_on_kmers_to_check.txt"
+    # command = f"bwa fastmap {kmers_to_check_fa} {read_file} -l {2*l+1} | grep -B 1 --no-group-separator ^EM > {mapped_reads_file}"
+    # res_map = os.system(command)
+    # if res_map != 0:
+    #     print("Mapping reads failed:", command)
+    #     sys.exit(1)
+    # print("Reads mapped to k-mers!")
+
+    # Parse the mapped reads file and update variant_dict with counts
+    with open(mapped_reads_file) as f:
+        for line in f:
+            #EM	11923	11955	1	CP075492.1_3$276$T$C$0:-1: that's the kind of output we have
+            if line.startswith("EM") : 
+                fields = line.strip().split(":")[0].split("\t")
+                # print(fields)
+                if fields[4] =="*":
+                    continue
+                kmer_info = fields[4].split("$")
+                chrom = kmer_info[0]
+                pos = int(kmer_info[1])
+                ref = kmer_info[2]
+                alt = kmer_info[3]
+                if alt == "REF":
+                    alt = ref
+
+                key = (chrom, pos, ref)
+                if key in variant_dict and alt in variant_dict[key]:
+                    if int(fields[3]) == 1 :
+                        variant_dict[key][alt] += 1
+                    else:
+                        ambiguous_variant_dict[key][alt] += 1
+
+                # Increment and display line counter occasionally
+                if 'line_counter' not in locals():
+                    line_counter = 0
+                line_counter += 1
+                if line_counter % 1000 == 0:
+                    print(f"Processed {line_counter} lines...", end="\r")
+    
+    print("finished countging; ")
+
+    # Write the updated VCF with counts
+    with open(output_vcf, "w") as fo:
+        with open(vcf_file) as f:
+            for line in f:
+                if line.startswith("#"):  # Write header lines as is
+                    fo.write(line)
+                    continue
+                ls = line.strip().split("\t")
+                chrom = ls[0]
+                pos = int(ls[1])
+                ref = ls[3]
+                alt = ls[4]
+                key = (chrom, pos, ref)
+                ref_count = 0
+                alt_count = 0
+                alt_ref_count=0
+                alt_alt_count=0
+                if key in variant_dict :
+                    if ref in variant_dict[key]:
+                        ref_count = variant_dict[key][ref]
+                    if alt in variant_dict[key]:
+                        alt_count = variant_dict[key][alt]
+                    alt_ref_count = ambiguous_variant_dict[key][ref] if ref in ambiguous_variant_dict[key] else 0
+                    alt_alt_count = ambiguous_variant_dict[key][alt] if alt in ambiguous_variant_dict[key] else 0
+                fo.write("\t".join(ls) + f"\tCOUNTS:{ref_count},{alt_count}\tACOUNTS:{alt_ref_count},{alt_alt_count}\n")
+
+def stats_on_variants(vcf_file_with_counts):
+
+    all_variant_callers = ["bcfcalls_normalized.vcf","clair_normalized.vcf","longshotcalls_normalized.vcf","nanocaller_normalized.vcf","snpsnoop_normalized.vcf"]
+    good_bad_unsure_missed_variants = {i:[0,0,0,0] for i in all_variant_callers}
+    this_assembler_in_another_variant= {i:-1 for i in all_variant_callers}
+
+    with open(vcf_file_with_counts) as f:
+
+        for line in f :
+            if line[0] == "#":
+                continue
+
+            ls = line.strip().split("\t")
+            chrom = ls[0]
+            position = int(ls[1])
+            ref = ls[3]
+            callers = ls[7].split(',')
+            counts_sure = [int(i) for i in ls[8].lstrip("COUNTS:").split(',')]
+            counts_unsure = [int(i) for i in ls[9].lstrip("ACOUNTS:").split(',')]
+            
+            variant = "good"
+            if counts_sure[1] == 0 and counts_unsure[1] == 0 :
+                variant = "bad"
+            elif counts_sure[1] == 0 and counts_unsure[1] > 0:
+                variant = "unsure"
+
+            if variant == "good" and "snpsnoop_normalized.vcf" not in callers and counts_sure[0]+counts_sure[1]+counts_unsure[0]+counts_unsure[1] > 10:
+                print(f"Missed in snpsnoop: {chrom}, {position}, {ref}, ", line)
+                sys.exit(0)
+
+            for caller in all_variant_callers:
+                if caller in callers:
+                    if variant == "good":
+                        good_bad_unsure_missed_variants[caller][0] += 1
+                    elif variant == "unsure":
+                        good_bad_unsure_missed_variants[caller][3] += 1
+                    elif variant == "bad":
+                        good_bad_unsure_missed_variants[caller][1] += 1
+                    this_assembler_in_another_variant[caller] = position - 1 + len(ref)
+                elif position > this_assembler_in_another_variant[caller] :
+                    if variant == "good":
+                        good_bad_unsure_missed_variants[caller][2] += 1 #missed variant
+                    elif variant == "unsure":
+                        good_bad_unsure_missed_variants[caller][3] += 1
+    
+    for caller in all_variant_callers:
+        print(f"Variant caller: {caller}")
+        print(f"Good variants: {good_bad_unsure_missed_variants[caller][0]}")
+        print(f"Bad variants: {good_bad_unsure_missed_variants[caller][1]}")
+        print(f"Missed variants: {good_bad_unsure_missed_variants[caller][2]}")
+        print(f"Unsure variants: {good_bad_unsure_missed_variants[caller][3]}")
+        print("-" * 40)
 
 
-# tmp_dir = "/home/rfaure/Documents/these/metaCaller/species/10_Ecoli/out/tmp"
-# try :
-#     os.mkdir(tmp_dir)
-# except: #if dir exist, good
-#     ... 
-# output_all_potential_kmers_represented_by_the_VCF("/home/rfaure/Documents/these/metaCaller/species/10_Ecoli/out_trash/variants.vcf", "/home/rfaure/Documents/these/metaCaller/species/10_Ecoli/one_strain.fa", "/home/rfaure/Documents/these/metaCaller/species/10_Ecoli/out/all_seqs_to_test.fa", 15)
-# map_the_potential_kmers_to_the_reference("/home/rfaure/Documents/these/metaCaller/species/10_Ecoli/out/all_seqs_to_test.fa", "/home/rfaure/Documents/these/metaCaller/species/10_Ecoli/ref.fasta", tmp_dir+"/mapped.txt", tmp_dir)
-# classify_the_variants(tmp_dir+"/mapped.txt")
+            
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate VCF with solution")
     parser.add_argument("-v", "--vcf", required=True, help="Path to the input VCF file containing variant information")
-    parser.add_argument("-r", "--ref", required=True, help="Path to the reference genome file in FASTA format")
+    parser.add_argument("-r", "--ref", required=False, help="Path to the reference genome file in FASTA format")
+    parser.add_argument("-f", "--reads", required=False, help="Path to the HiFi reads")
     # parser.add_argument("-s", "--solution", required=True, help="Path to the solution file")
-    parser.add_argument("-l", "--length", type=int, default=15, help="Length of the k-mers to be generated on each side of the variant (default: 15)")
-    parser.add_argument("-o", "--output", required=True, help="Path to the output file where the output kmers will be written")
+    parser.add_argument("-l", "--length", type=int, default=25, help="Length of the k-mers to be generated on each side of the variant (default: 15)")
+    parser.add_argument("-o", "--output", required=True, help="Path to the output VCF file with the counts")
 
     args = parser.parse_args()
 
@@ -347,14 +492,40 @@ if __name__ == "__main__":
     except FileExistsError:
         pass
 
-    nb_of_variants_we_cannot_output = output_all_potential_kmers_represented_by_the_VCF(args.vcf, args.ref, args.output, args.length)
-    # map_the_potential_kmers_to_the_reference(os.path.join(tmp_dir, "all_seqs_to_test.fa"), args.solution, os.path.join(tmp_dir, "mapped.txt"), tmp_dir)
-    # classify_the_variants(os.path.join(tmp_dir, "mapped.txt"), args.output)
-    # print("Did not test ", nb_of_variants_we_cannot_output, " variants because there were too many variants around")
+    reference_genome_available = False
+    if not args.ref and not args.reads:
+        print("Error: Either a reference genome file (--ref) or HiFi reads (--reads) must be provided.")
+        sys.exit(1)
+    elif args.ref:
+        reference_genome_available = True
 
-    # solution_calls = os.path.join(tmp_dir, "solution.vcf")
-    # generate_solution_calls_with_minipileup(args.solution, args.ref, tmp_dir, solution_calls)
-    # missing_variants = count_number_of_missing_variants(solution_calls, args.vcf)
+    #to normalize the variants: first use normalize_variants.py, then vt
+
+
+    nb_of_variants_we_cannot_output = output_all_potential_kmers_represented_by_the_VCF(args.vcf, args.ref, "kmers_to_check.fa", args.length)
+    print("Outputted all variants as k-mers")
+
+    if reference_genome_available :
+        map_the_potential_kmers_to_the_reference(os.path.join(tmp_dir, "kmers_to_check.fa"), args.solution, os.path.join(tmp_dir, "mapped.txt"), tmp_dir)
+        classify_the_variants(os.path.join(tmp_dir, "mapped.txt"), args.output)
+        print("Did not test ", nb_of_variants_we_cannot_output, " variants because there were too many variants around")
+
+        # solution_calls = os.path.join(tmp_dir, "solution.vcf")
+        # generate_solution_calls_with_minipileup(args.solution, args.ref, tmp_dir, solution_calls)
+        # missing_variants = count_number_of_missing_variants(solution_calls, args.vcf)
+    else:
+        map_hifi_reads_on_the_kmers_to_check(
+            kmers_to_check_fa="kmers_to_check.fa",
+            vcf_file=args.vcf,
+            read_file=args.reads,  # Replace with the actual path to HiFi reads
+            output_vcf=args.output,
+            l = args.length
+        )
+        print("mapped the reads")
+
+        stats_on_variants(args.output)
+
+
 
 
 
