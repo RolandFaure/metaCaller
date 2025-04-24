@@ -3,7 +3,7 @@ SNPsnoop
 Authors: Roland Faure, based on a previous program (strainminer) by Minh Tam Truong Khac
 """
 
-__version__ = '0.3.5'
+__version__ = '0.3.6'
 
 import pandas as pd 
 import numpy as np
@@ -149,7 +149,7 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
             unique = unique[idx_sort]
             refbase = reference_sequence[pileupcolumn.reference_pos].upper()
 
-            if len(counts) == 1 or (unique[-1]==refbase and max(2,(1-no_snp_threshold)*pileupcolumn.nsegments) > counts[-2]):
+            if (len(counts) == 1 and unique[-1] ==refbase) or (len(counts) > 1 and unique[-1]==refbase and max(2,(1-no_snp_threshold)*pileupcolumn.nsegments) > counts[-2]):
                 continue
 
             #to obtain allbases2, convert allbases_raw: output only the A,C,G,T and *, forget the + and - and the following number
@@ -294,6 +294,7 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
     for label in np.unique(labels):
         idx = np.where(labels == label)[0] #idx is the list of positions where the group label is label
         if len(idx) >= 1:
+
             submatrix = pileup_filled[:,idx]
             #compute the average value of each row and store it in a vector
             row_means = submatrix.mean(axis = 1)
@@ -316,14 +317,15 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
                 for i in idx:
                     snps_res[list_of_sus_pos[i]] = set([list_of_reads[i] for i in list(np.where(row_means <= 0.1)[0])])
                 
-                # print("I found a rectangle of ", nb_rows_0s, " rows of 0s in a cluster of ", len(idx), " columns, among in total ", number_loci, " columns and ", number_reads, " rows with an error rate of ", error_rate, ", which gives a p-value of ", p_value_of_the_column_cluster)
-                # for i in range(len(idx)):
-                #     for j in range(number_reads):
-                #         print(int(submatrix[j,i]), end = '')
-                #     print(' : ', idx[i])
-                # print('')
+            # print("I found a rectangle of ", nb_rows_0s, " rows of 0s in a cluster of ", len(idx), " columns, among in total ", number_loci, " columns and ", number_reads, " rows with an error rate of ", error_rate, ", which gives a p-value of ", p_value_of_the_column_cluster)
+            # for i in range(len(idx)):
+            #     for j in range(number_reads):
+            #         print(int(submatrix[j,i]), end = '')
+            #     print(' : ', idx[i])
+            
+            # print('')
 
-                # print("position ", list_of_sus_pos[i], " and reads ", set([list_of_reads[i] for i in list(np.where(row_means <= 0.1)[0])]))
+            # print("position ", list_of_sus_pos[i], " and reads ", set([list_of_reads[i] for i in list(np.where(row_means <= 0.1)[0])]))
 
 
     #as a last step, recover the SNPs which correlate well with validated SNPs, using the already computed pvalues
@@ -341,7 +343,7 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
     for col in range(number_loci):
         alt_count = np.sum(pileup[:, col] == 0)  # Count of alternative bases (0s)
         total_count = np.sum(~np.isnan(pileup[:, col]))  # Total count of non-NaN values
-        if alt_count / total_count > 0.5 and alt_count >= 2:  # Check if alternative bases are dominant
+        if alt_count >= 2 and alt_count / total_count > 0.5:  # Check if alternative bases are dominant
             # print(f"Debug: SNP at position {list_of_sus_pos[col]} with {alt_count} alternative bases out of {total_count} total bases.")
             # print(f"Pileup: {pileup[:, col]}")
             if list_of_sus_pos[col] not in snps_res:
@@ -675,6 +677,10 @@ if __name__ == '__main__':
                 windows_description.append((contig_name,start_pos,contig_length, out+'/tmp/'+contig_name+'_'+str(start_pos)+'.vcf'))
 
     bamfile_ps.close()
+
+    print("DEBUUUUG")
+    windows_description = [window for window in windows_description if window[0] == "contig_9999" and window[1] <= 17062 <= window[2]]
+    print(windows_description)
 
     # windows_description = [i for i in windows_description if i[1]< 5000]
     #windows_description = [("CP075493.1_1", 12320000, 12325000, out+'/tmp/'+"CP075493.1"+'_'+str(70000)+'.vcf')] #DEBUGbc
