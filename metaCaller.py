@@ -3,7 +3,7 @@ SNPsnoop
 Authors: Roland Faure, based on a previous program (strainminer) by Minh Tam Truong Khac
 """
 
-__version__ = '0.3.6'
+__version__ = '0.3.7'
 
 import pandas as pd 
 import numpy as np
@@ -61,6 +61,7 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
     """
     
     bamfile_ps = ps.AlignmentFile(bamfile,'rb')
+    obvious_snps = {}
 
     #first classify the reads in several groups, according to what they span in the window
     breakpoints_left = [stop_pos] #bp with reads left
@@ -175,7 +176,10 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
             #if there is a base different from the reference, add the position to the list of suspicious positions
             alternative_bases = set()
             for alt_b in range(len(unique)-1,-1,-1):
-                if unique[alt_b] != refbase and counts[alt_b] > (1-no_snp_threshold)*len(tmp_dict):
+                if unique[alt_b] != refbase and  counts[alt_b] >= 2 and counts[alt_b] / len(allbases_2) > 0.5:  # Check if alternative bases are dominant                    
+                    obvious_snps[pileupcolumn.reference_pos] = set([allreads[row] for row in range(len(allreads)) if allbases[row] == unique[alt_b]])
+                    
+                elif unique[alt_b] != refbase and counts[alt_b] > (1-no_snp_threshold)*len(tmp_dict):
                     alternative_bases.add(unique[alt_b])
 
             #in tmp_dict, replace the refbase by 1 and the alternative base by 0, and the rest by np.nan
@@ -207,7 +211,7 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
         matrices_list.append(matrices[combination])
         list_of_suspicious_positions_list.append(list_of_suspicious_positions[combination])
 
-    return matrices_list, list_of_suspicious_positions_list
+    return matrices_list, list_of_suspicious_positions_list, obvious_snps
 
 def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_on_a_column):
     """
@@ -239,7 +243,7 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
     number_reads,number_loci = pileup.shape
     pileup_filled = deepcopy(pileup)
 
-    if number_reads>1 and number_loci>1:
+    if number_reads>1 and number_loci>1 :
         imputer = KNNImputer(n_neighbors=5, copy=False, keep_empty_features=True)
         pileup_filled = imputer.fit_transform(pileup_filled)
         pileup_filled[(pileup_filled>=0.5)] = 1
@@ -338,16 +342,6 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
                 #     print("I am looking at the correlation of the SNP ", list_of_sus_pos[i], " with the SNP ", list_of_sus_pos[j], " which has a p-value of ", pvalue)
                 if pvalue < 0.0001:
                     snps_res[list_of_sus_pos[j]] = set([list_of_reads[alt_row] for alt_row in range(len(pileup)) if pileup_filled[alt_row,j]==0])
-
-    # Perform a simple pileup call for SNPs with near 100% alternative bases, which are not called by the above procedure
-    for col in range(number_loci):
-        alt_count = np.sum(pileup[:, col] == 0)  # Count of alternative bases (0s)
-        total_count = np.sum(~np.isnan(pileup[:, col]))  # Total count of non-NaN values
-        if alt_count >= 2 and alt_count / total_count > 0.5:  # Check if alternative bases are dominant
-            # print(f"Debug: SNP at position {list_of_sus_pos[col]} with {alt_count} alternative bases out of {total_count} total bases.")
-            # print(f"Pileup: {pileup[:, col]}")
-            if list_of_sus_pos[col] not in snps_res:
-                snps_res[list_of_sus_pos[col]] = set([list_of_reads[row] for row in range(len(pileup)) if pileup[row, col] == 0])
 
     #return the list of validated snps
     return snps_res
@@ -511,7 +505,7 @@ def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_t
     #print(f'Parsing data on contig {contig_name} {start_pos}<->{end_pos}')
     #time get_data
     time_get_data = time.time()
-    list_of_matrices, list_of_list_of_suspicious_positions = get_data(bamfile, ref, contig_name,start_pos,end_pos, no_snp_threshold) #for each window you can have different groups of reads e.g. if some of them align with very big gaps; Here, the lists represent the different groups of reads
+    list_of_matrices, list_of_list_of_suspicious_positions, obvious_snps = get_data(bamfile, ref, contig_name,start_pos,end_pos, no_snp_threshold) #for each window you can have different groups of reads e.g. if some of them align with very big gaps; Here, the lists represent the different groups of reads
     time_get_data2 = time.time() - time_get_data
 
     all_variants = {} #map of position -> set of reads with alt alleles
@@ -535,6 +529,11 @@ def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_t
                     all_variants[pos] = variants_here[pos]
                 else:
                     all_variants[pos] = all_variants[pos].union(variants_here[pos])
+
+    # Merge obvious SNPs with less obvious SNPs
+    for pos, reads in obvious_snps.items():
+        if pos not in all_variants:
+            all_variants[pos] = reads
 
     time_call_variants2 = time.time() - time_call_variants
     time_output_vcf2 = 0
@@ -678,12 +677,11 @@ if __name__ == '__main__':
 
     bamfile_ps.close()
 
-    print("DEBUUUUG")
-    windows_description = [window for window in windows_description if window[0] == "contig_9999" and window[1] <= 17062 <= window[2]]
-    print(windows_description)
+    # Filter windows for contig_9843 encompassing position 35042
+    # windows_description = [window for window in windows_description if window[0] == 'contig_9840' and window[1] <= 8829 < window[2]]
+    # print(windows_description)
+    # print("DEBUUUUUUG")
 
-    # windows_description = [i for i in windows_description if i[1]< 5000]
-    #windows_description = [("CP075493.1_1", 12320000, 12325000, out+'/tmp/'+"CP075493.1"+'_'+str(70000)+'.vcf')] #DEBUGbc
     with ProcessPoolExecutor(max_workers=num_threads) as executor:
         futures = [executor.submit(call_variants_on_this_window, window[0], window[1], window[2], filtered_col_threshold, no_snp_threshold, bamfile, originalAssembly, window[3], max_error_rate_on_column) for window in windows_description]
         for future in futures:
