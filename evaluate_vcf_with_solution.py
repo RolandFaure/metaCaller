@@ -4,6 +4,8 @@ import sys
 import argparse
 import os
 from copy import deepcopy
+import pysam
+import numpy as np
 import matplotlib.pyplot as plt
 
 
@@ -103,7 +105,7 @@ def output_all_potential_kmers_represented_by_the_VCF(vcffile, reffile, outfile,
                 continue
             #now list all the extensions right
             print("computing ext for pos ", pos, " on contig ", contig, end='\r')
-            extensions_right = [("", pos+1)] #extensions are a pair (seq, pos_on_ref)
+            extensions_right = [("", pos)] #extensions are a pair (seq, pos_on_ref)
             go_on = True
             while go_on:
                 go_on = False
@@ -139,14 +141,13 @@ def output_all_potential_kmers_represented_by_the_VCF(vcffile, reffile, outfile,
                 continue
             for variant in variants[(contig, variant_pos)]:
                 index_seq_for_this_snp = 0
-                # print("len ", extensions_of_every_base_left[variant_pos], " ", extensions_of_every_base_right[variant_pos+len(variant[0])-1])
                 for left_ext in extensions_of_every_base_left[variant_pos]:
-                    for right_ext in extensions_of_every_base_right[variant_pos+len(variant[0])-1]:
+                    for right_ext in extensions_of_every_base_right[variant_pos+len(variant[0])]:
                         fo.write(">"+contig+"$"+str(variant_pos+1)+"$"+variant[0]+"$"+variant[1]+"$" + str(index_seq_for_this_snp) +"\n")
                         fo.write(left_ext+variant[1]+right_ext+"\n")
                         index_seq_for_this_snp+=1
-                fo.write(">"+contig+"$"+str(variant_pos+1)+"$"+variant[0]+"$REF\n")
-                fo.write(left_ext+ variant[0] +right_ext+"\n")
+                        fo.write(">"+contig+"$"+str(variant_pos+1)+"$"+variant[0]+"$REF\n")
+                        fo.write(left_ext+ variant[0] +right_ext+"\n")
                 index_snp +=1
 
 
@@ -445,9 +446,8 @@ def stats_on_variants(vcf_file_with_counts):
             elif counts_sure[1] == 0 and counts_unsure[1] > 0:
                 variant = "unsure"
 
-            if variant == "good" and "snpsnoop_normalized.vcf" not in callers and counts_sure[0]+counts_sure[1]+counts_unsure[0]+counts_unsure[1] > 10:
-                print(f"Missed in snpsnoop: {chrom}, {position}, {ref}, ", line)
-                sys.exit(0)
+            if variant == "bad" and "snpsnoop_normalized.vcf" in callers and counts_sure[0]+counts_sure[1]+counts_unsure[0]+counts_unsure[1] > 10 and chrom=="contig_10":
+                print(f"Bad in snpsnoop: {chrom}, {position}, {ref}, ", line)
 
             for caller in all_variant_callers:
                 if caller in callers:
@@ -472,15 +472,142 @@ def stats_on_variants(vcf_file_with_counts):
         print(f"Unsure variants: {good_bad_unsure_missed_variants[caller][3]}")
         print("-" * 40)
 
+#input: vcf file containing all variants, bam file of hifi mapped on ref
+def compare_calls_with_HiFi(all_variants, mapped_hifi):
 
-            
+    # Index all positions (contig_name, position) from the input VCF
+    variants = {}
+    number_of_non_indexed_variants = 0
+    with open(all_variants) as vcf_file:
+        for line in vcf_file:
+            if line.startswith("#"):
+                continue
+            fields = line.strip().split("\t")
+            if len(fields[3]) != len(fields[4]) or ',' in fields[4]: #insertion/deletion, we'll look at that later
+                number_of_non_indexed_variants += 1
+                continue
+            fields[4] = fields[4].replace('.', '*')
+            callers = fields[-1].split(',')
+            contig_name = fields[0]
+            position = int(fields[1]) - 1  # Convert 1-based to 0-based
+            for i in range(len(fields[3])) :
+                if fields[3][i] == fields[4][i]:
+                    continue
+                if (contig_name, position+i) not in variants :
+                    variants[(contig_name, position+i)] = {}
+                    variants[(contig_name, position+i)]["ref"] = fields[3][i]
+                for caller in callers :
+                    variants[(contig_name, position+i)][caller] = fields[4][i]
+    print(f"Indexed {len(variants)} positions from the input VCF. Not indexed ", number_of_non_indexed_variants)
+
+    # # Create a BED file describing all positions we need
+    # bed_file_path = os.path.join(tmp_dir, "positions_to_check.bed")
+    # with open(bed_file_path, "w") as bed_file:
+    #     for (contig, pos), variant_info in variants.items():
+    #         bed_file.write(f"{contig}\t{pos}\t{pos + 1}\n")
+    # print(f"BED file created at {bed_file_path}")
+
+    # Step 1: Generate the pileup for all variant positions
+    pileup_file = os.path.join(tmp_dir, "variants.pileup")
+    # variant_positions = ",".join([f"{contig}:{pos + 1}" for contig, pos in variants.keys()])
+    # command = f"samtools mpileup -l {bed_file_path} {mapped_hifi} > {pileup_file}"
+    # res = os.system(command)
+    # if res != 0:
+    #     print("Pileup generation failed:", command)
+    #     sys.exit(1)
+    print("Pileup generation completed.")
+
+    # Step 2: Parse the pileup and count base occurrences for each variant position
+    base_counts = {}
+    with open(pileup_file) as pileup_in:
+        for line in pileup_in:
+            fields = line.strip().split("\t")
+            if len(fields) >= 5:
+                contig, pos = fields[0], int(fields[1]) - 1  # Convert 1-based to 0-based
+                bases = fields[4]
+                counts = {base: bases.upper().count(base) for base in "ATCG*"}
+                base_counts[(contig, pos)] = counts
+            else:
+                contig, pos = fields[0], int(fields[1]) - 1
+                base_counts[(contig, pos)] = {"A": 0, "T": 0, "C": 0, "G": 0, "*": 0}
+    print("Base counting completed.")
+
+    # Initialize statistics for each caller
+    caller_stats = {}
+    total_number_of_true_variants = 0
+    hist_cov_correctly_called_snpsnoop = [0 for i in range(100)]
+    hist_cov_false_positive_snpsnoop = [0 for i in range(100)]
+    hist_cov_false_negative_snpsnoop = [0 for i in range(100)]
+    for variant_key, variant_info in variants.items():
+        contig, pos = variant_key
+        ref_base = variant_info["ref"]
+        found_variant = False
+        for caller, alt_base in variant_info.items():
+            if caller == "ref":
+                continue
+            if caller not in caller_stats:
+                caller_stats[caller] = {"recall": 0, "false_positives": 0, "total": 0}
+            caller_stats[caller]["total"] += 1
+
+            # Check if the base is seen in the pileup
+            if variant_key in base_counts:
+                counts = base_counts[variant_key]
+                if counts[alt_base] > 0:
+                    caller_stats[caller]["recall"] += 1
+                    found_variant = True
+                    if "snpsnoop_normalized.vcf" not in variant_info :
+                        if np.sum(list(counts.values())) > 100 :
+                            print("Missing snp : ", variant_key, " ", variant_info, " ", counts)
+                        hist_cov_false_negative_snpsnoop[min(99,np.sum(list(counts.values())))] += 1
+                    else:
+                        hist_cov_correctly_called_snpsnoop[min(99,np.sum(list(counts.values())))] += 1
+
+                else:
+                    caller_stats[caller]["false_positives"] += 1
+                    hist_cov_false_positive_snpsnoop[min(99,np.sum(list(counts.values())))] += 1
+                    # if caller == "snpsnoop_normalized.vcf":
+                    #     print("false positive snp ", variant_key, " ", variant_info)
+            else:
+                caller_stats[caller]["false_positives"] += 1
+
+        if found_variant:
+            total_number_of_true_variants += 1
+
+    # Print statistics for each caller
+    for caller, stats in caller_stats.items():
+        recall = stats["recall"] / total_number_of_true_variants
+        false_positive_rate = stats["false_positives"] / (stats["recall"]+stats["false_positives"] )
+        print(f"Caller: {caller}")
+        print(f"  Recall: {recall:.2%}")
+        print(f"  False Positive Rate: {false_positive_rate:.2%}")
+        print(f"  Total Variants: {stats['total']}")
+        print(f"  True Positives: {stats['recall']}")
+        print(f"  False Positives: {stats['false_positives']}")
+        print("-" * 40)
+
+    # Plot histograms for SNP-Snoop
+    x = np.arange(100)
+
+    plt.figure(figsize=(12, 6))
+    plt.bar(x - 0.3, hist_cov_correctly_called_snpsnoop, width=0.3, label="Correctly Called", color="green")
+    plt.bar(x, hist_cov_false_positive_snpsnoop, width=0.3, label="False Positives", color="red")
+    plt.bar(x + 0.3, hist_cov_false_negative_snpsnoop, width=0.3, label="False Negatives", color="blue")
+
+    plt.xlabel("Coverage")
+    plt.ylabel("Frequency")
+    plt.title("Coverage Histogram for SNP-Snoop Variants")
+    plt.legend()
+    plt.grid(axis="y", linestyle="--", alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate VCF with solution")
     parser.add_argument("-v", "--vcf", required=True, help="Path to the input VCF file containing variant information")
-    parser.add_argument("-r", "--ref", required=False, help="Path to the reference genome file in FASTA format")
+    parser.add_argument("-r", "--ref", required=True, help="Path to the reference genome file in FASTA format")
     parser.add_argument("-f", "--reads", required=False, help="Path to the HiFi reads")
-    # parser.add_argument("-s", "--solution", required=True, help="Path to the solution file")
+    parser.add_argument("-s", "--solution", required=False, help="Path to the solution file")
     parser.add_argument("-l", "--length", type=int, default=25, help="Length of the k-mers to be generated on each side of the variant (default: 15)")
     parser.add_argument("-o", "--output", required=True, help="Path to the output VCF file with the counts")
 
@@ -493,19 +620,19 @@ if __name__ == "__main__":
         pass
 
     reference_genome_available = False
-    if not args.ref and not args.reads:
-        print("Error: Either a reference genome file (--ref) or HiFi reads (--reads) must be provided.")
+    if not args.solution and not args.reads:
+        print("Error: Either a solution genome file (--solution) or HiFi reads (--reads) must be provided.")
         sys.exit(1)
-    elif args.ref:
+    elif args.solution:
         reference_genome_available = True
 
     #to normalize the variants: first use normalize_variants.py, then vt
 
 
-    nb_of_variants_we_cannot_output = output_all_potential_kmers_represented_by_the_VCF(args.vcf, args.ref, "kmers_to_check.fa", args.length)
-    print("Outputted all variants as k-mers")
-
     if reference_genome_available :
+         # nb_of_variants_we_cannot_output = output_all_potential_kmers_represented_by_the_VCF(args.vcf, args.ref, "kmers_to_check.fa", args.length)
+          # print("Outputted all variants as k-mers")
+
         map_the_potential_kmers_to_the_reference(os.path.join(tmp_dir, "kmers_to_check.fa"), args.solution, os.path.join(tmp_dir, "mapped.txt"), tmp_dir)
         classify_the_variants(os.path.join(tmp_dir, "mapped.txt"), args.output)
         print("Did not test ", nb_of_variants_we_cannot_output, " variants because there were too many variants around")
@@ -514,16 +641,37 @@ if __name__ == "__main__":
         # generate_solution_calls_with_minipileup(args.solution, args.ref, tmp_dir, solution_calls)
         # missing_variants = count_number_of_missing_variants(solution_calls, args.vcf)
     else:
-        map_hifi_reads_on_the_kmers_to_check(
-            kmers_to_check_fa="kmers_to_check.fa",
-            vcf_file=args.vcf,
-            read_file=args.reads,  # Replace with the actual path to HiFi reads
-            output_vcf=args.output,
-            l = args.length
-        )
-        print("mapped the reads")
+        mapped_reads_bam = "hifi_on_ref.bam"
 
-        stats_on_variants(args.output)
+        # # Index the BAM file
+        # command = f"samtools index {mapped_reads_bam}"
+        # res = os.system(command)
+        # if res != 0:
+        #     print("Indexing BAM file failed:", command)
+        #     sys.exit(1)
+
+        # print("HiFi reads successfully mapped and indexed.")
+
+        # map_hifi_reads_on_the_kmers_to_check(
+        #     kmers_to_check_fa="kmers_to_check.fa",
+        #     vcf_file=args.vcf,
+        #     read_file=args.reads,  # Replace with the actual path to HiFi reads
+        #     output_vcf=args.output,
+        #     l = args.length
+        # )
+        # print("mapped the reads")
+
+        # stats_on_variants(args.output)
+
+        # # Map HiFi reads to the reference genome using minimap2
+        # command = f"minimap2 -a -x map-hifi {args.ref} {args.reads} | samtools view -bS - | samtools sort -o {mapped_reads_bam}"
+        # print("Mapping HiFi reads to the reference genome:", command)
+        # res = os.system(command)
+        # if res != 0:
+        #     print("Mapping HiFi reads failed:", command)
+        #     sys.exit(1)
+
+        compare_calls_with_HiFi(args.vcf, mapped_reads_bam)
 
 
 
