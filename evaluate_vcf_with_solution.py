@@ -6,6 +6,7 @@ import os
 from copy import deepcopy
 import pysam
 import numpy as np
+import pickle
 import matplotlib.pyplot as plt
 
 
@@ -475,30 +476,31 @@ def stats_on_variants(vcf_file_with_counts):
 #input: vcf file containing all variants, bam file of hifi mapped on ref
 def compare_calls_with_HiFi(all_variants, mapped_hifi):
 
-    # Index all positions (contig_name, position) from the input VCF
-    variants = {}
-    number_of_non_indexed_variants = 0
-    with open(all_variants) as vcf_file:
-        for line in vcf_file:
-            if line.startswith("#"):
-                continue
-            fields = line.strip().split("\t")
-            if len(fields[3]) != len(fields[4]) or ',' in fields[4]: #insertion/deletion, we'll look at that later
-                number_of_non_indexed_variants += 1
-                continue
-            fields[4] = fields[4].replace('.', '*')
-            callers = fields[-1].split(',')
-            contig_name = fields[0]
-            position = int(fields[1]) - 1  # Convert 1-based to 0-based
-            for i in range(len(fields[3])) :
-                if fields[3][i] == fields[4][i]:
-                    continue
-                if (contig_name, position+i) not in variants :
-                    variants[(contig_name, position+i)] = {}
-                    variants[(contig_name, position+i)]["ref"] = fields[3][i]
-                for caller in callers :
-                    variants[(contig_name, position+i)][caller] = fields[4][i]
-    print(f"Indexed {len(variants)} positions from the input VCF. Not indexed ", number_of_non_indexed_variants)
+    # # Index all positions (contig_name, position) from the input VCF
+    # variants = {}
+    # number_of_non_indexed_variants = 0
+    # with open(all_variants) as vcf_file:
+    #     for line in vcf_file:
+    #         if line.startswith("#"):
+    #             continue
+    #         fields = line.strip().split("\t")
+    #         if len(fields[3]) != len(fields[4]) or ',' in fields[4]: #insertion/deletion, we'll look at that later
+    #             number_of_non_indexed_variants += 1
+    #             continue
+    #         fields[4] = fields[4].replace('.', '*')
+    #         callers = fields[-2].split(',')
+    #         depths = [int(i) if i != '*' else 0 for i in fields[-1].split(',')]
+    #         contig_name = fields[0]
+    #         position = int(fields[1]) - 1  # Convert 1-based to 0-based
+    #         for i in range(len(fields[3])) :
+    #             if fields[3][i] == fields[4][i]:
+    #                 continue
+    #             if (contig_name, position+i) not in variants :
+    #                 variants[(contig_name, position+i)] = {}
+    #                 variants[(contig_name, position+i)][("ref",0)] = fields[3][i]
+    #             for c, caller in enumerate(callers) :
+    #                 variants[(contig_name, position+i)][(caller, depths[c])] = fields[4][i]
+    # print(f"Indexed {len(variants)} positions from the input VCF. Not indexed ", number_of_non_indexed_variants)
 
     # # Create a BED file describing all positions we need
     # bed_file_path = os.path.join(tmp_dir, "positions_to_check.bed")
@@ -507,30 +509,57 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi):
     #         bed_file.write(f"{contig}\t{pos}\t{pos + 1}\n")
     # print(f"BED file created at {bed_file_path}")
 
-    # Step 1: Generate the pileup for all variant positions
-    pileup_file = os.path.join(tmp_dir, "variants.pileup")
+    # # Step 1: Generate the pileup for all variant positions
+    # pileup_file = os.path.join(tmp_dir, "variants.pileup")
     # variant_positions = ",".join([f"{contig}:{pos + 1}" for contig, pos in variants.keys()])
     # command = f"samtools mpileup -l {bed_file_path} {mapped_hifi} > {pileup_file}"
     # res = os.system(command)
     # if res != 0:
     #     print("Pileup generation failed:", command)
     #     sys.exit(1)
-    print("Pileup generation completed.")
+    # print("Pileup generation completed.")
 
-    # Step 2: Parse the pileup and count base occurrences for each variant position
-    base_counts = {}
-    with open(pileup_file) as pileup_in:
-        for line in pileup_in:
-            fields = line.strip().split("\t")
-            if len(fields) >= 5:
-                contig, pos = fields[0], int(fields[1]) - 1  # Convert 1-based to 0-based
-                bases = fields[4]
-                counts = {base: bases.upper().count(base) for base in "ATCG*"}
-                base_counts[(contig, pos)] = counts
-            else:
-                contig, pos = fields[0], int(fields[1]) - 1
-                base_counts[(contig, pos)] = {"A": 0, "T": 0, "C": 0, "G": 0, "*": 0}
-    print("Base counting completed.")
+    # # Step 2: Parse the pileup and count base occurrences for each variant position
+    # base_counts = {}
+    # with open(pileup_file) as pileup_in:
+    #     for line in pileup_in:
+    #         fields = line.strip().split("\t")
+    #         if len(fields) >= 5:
+    #             contig, pos = fields[0], int(fields[1]) - 1  # Convert 1-based to 0-based
+    #             bases = fields[4]
+    #             counts = {base: bases.upper().count(base) for base in "ATCG*"}
+    #             base_counts[(contig, pos)] = counts
+    #         else:
+    #             contig, pos = fields[0], int(fields[1]) - 1
+    #             base_counts[(contig, pos)] = {"A": 0, "T": 0, "C": 0, "G": 0, "*": 0}
+    # print("Base counting completed.")
+
+    # # Save base_counts and variants to pickle files to avoid recalculating
+    # base_counts_pickle_file = os.path.join(tmp_dir, "base_counts.pkl")
+    # variants_pickle_file = os.path.join(tmp_dir, "variants.pkl")
+
+    # if not os.path.exists(base_counts_pickle_file) or not os.path.exists(variants_pickle_file):
+    #     # Save base_counts
+    #     with open(base_counts_pickle_file, "wb") as pkl_out:
+    #         pickle.dump(base_counts, pkl_out)
+    #     print(f"Base counts saved to {base_counts_pickle_file}")
+
+    #     # Save variants
+    #     with open(variants_pickle_file, "wb") as pkl_out:
+    #         pickle.dump(variants, pkl_out)
+    #     print(f"Variants saved to {variants_pickle_file}")
+    # else:
+    # Load base_counts
+
+    base_counts_pickle_file = os.path.join(tmp_dir, "base_counts.pkl")
+    variants_pickle_file = os.path.join(tmp_dir, "variants.pkl")
+    # Load variants
+    with open(variants_pickle_file, "rb") as pkl_in:
+        variants = pickle.load(pkl_in)
+    print(f"Variants loaded from {variants_pickle_file}")
+    with open(base_counts_pickle_file, "rb") as pkl_in:
+        base_counts = pickle.load(pkl_in)
+    print(f"Base counts loaded from {base_counts_pickle_file}")
 
     # Initialize statistics for each caller
     caller_stats = {}
@@ -540,34 +569,39 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi):
     hist_cov_false_negative_snpsnoop = [0 for i in range(100)]
     for variant_key, variant_info in variants.items():
         contig, pos = variant_key
-        ref_base = variant_info["ref"]
+        ref_base = variant_info[("ref", 0)]
         found_variant = False
-        for caller, alt_base in variant_info.items():
+        for caller_and_depth, alt_base in variant_info.items():
+            caller, depth = caller_and_depth
             if caller == "ref":
                 continue
-            if caller not in caller_stats:
+            if variant_info[caller_and_depth] == "*":
+                continue
+            if alt_base == "*" or caller not in caller_stats:
                 caller_stats[caller] = {"recall": 0, "false_positives": 0, "total": 0}
             caller_stats[caller]["total"] += 1
 
             # Check if the base is seen in the pileup
             if variant_key in base_counts:
+
                 counts = base_counts[variant_key]
                 if counts[alt_base] > 0:
                     caller_stats[caller]["recall"] += 1
-                    found_variant = True
-                    if "snpsnoop_normalized.vcf" not in variant_info :
-                        if np.sum(list(counts.values())) > 100 :
-                            print("Missing snp : ", variant_key, " ", variant_info, " ", counts)
-                        hist_cov_false_negative_snpsnoop[min(99,np.sum(list(counts.values())))] += 1
-                    else:
+                    found_variant = True 
+                    if not any(caller == "snpsnoop_normalized.vcf" for caller, _ in variant_info.keys()):
+                        if depth > 30:
+                            print("Missing snp : ", variant_key, " ", variant_info, ", DP in other caller: ", depth)
                         hist_cov_correctly_called_snpsnoop[min(99,np.sum(list(counts.values())))] += 1
+                    elif caller == "bcfcalls_normalized.vcf":
+                        hist_cov_false_negative_snpsnoop[min(99,depth)] += 1
 
                 else:
                     caller_stats[caller]["false_positives"] += 1
-                    hist_cov_false_positive_snpsnoop[min(99,np.sum(list(counts.values())))] += 1
-                    # if caller == "snpsnoop_normalized.vcf":
-                    #     print("false positive snp ", variant_key, " ", variant_info)
-            else:
+                    hist_cov_false_positive_snpsnoop[min(99,depth)] += 1
+                    # if caller == "snpsnoop_normalized.vcf" :#and "bcfcalls_normalized" not in variant_info.keys():
+                    #     if contig == "contig_3747" :
+                    #         print("false positive snp ", variant_key, " ", variant_info)
+                    # if caller == "snpsnoop_normalized.vcf" and not any(c == "bcfcalls_normalized" for c, _ in variant_info.keys()):
                 caller_stats[caller]["false_positives"] += 1
 
         if found_variant:
@@ -589,7 +623,7 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi):
     x = np.arange(100)
 
     plt.figure(figsize=(12, 6))
-    plt.bar(x - 0.3, hist_cov_correctly_called_snpsnoop, width=0.3, label="Correctly Called", color="green")
+    # plt.bar(x - 0.3, hist_cov_correctly_called_snpsnoop, width=0.3, label="Correctly Called", color="green")
     plt.bar(x, hist_cov_false_positive_snpsnoop, width=0.3, label="False Positives", color="red")
     plt.bar(x + 0.3, hist_cov_false_negative_snpsnoop, width=0.3, label="False Negatives", color="blue")
 
