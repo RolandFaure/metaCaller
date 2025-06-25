@@ -3,7 +3,7 @@ SNPsnoop
 Authors: Roland Faure, based on a previous program (strainminer) by Minh Tam Truong Khac
 """
 
-__version__ = '0.3.11'
+__version__ = '0.3.14'
 
 import pandas as pd 
 import numpy as np
@@ -26,6 +26,7 @@ from argparse import ArgumentParser
 
 import threading
 from concurrent.futures import ProcessPoolExecutor
+import shutil
 
 fasta_lock = threading.Lock()
 bam_lock = threading.Lock()
@@ -46,7 +47,7 @@ def statistical_test(a,n,b,m,error_rate):
         return 1
     return np.exp(result_log)
 
-def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_threshold = 0.95, max_error_rate_on_a_column = 0.1):
+def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_threshold = 0.95, max_error_rate_on_a_column = 0.1, variants_already_called = {}):
     """
     Extracts a binary matrix of reads and columns from a BAM file, identifying suspicious positions in a specified contig region.
     Args:
@@ -56,6 +57,8 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
         start_pos (int): Start position of the region to analyze.
         stop_pos (int): Stop position of the region to analyze.
         no_snp_threshold (float, optional): Threshold for considering a position as suspicious. Default is 0.95.
+        max_error_rate_on_a_column (float, optional): Maximum error rate allowed for a column to be considered. Default is 0.1.
+        variants_already_called (dict, optional): Dictionary of variants already called: positions -> set of reads. Default is {}.
     Returns:
         tuple: A tuple containing:
             - matrix (dict): A dictionary where keys are positions and values are dictionaries mapping read names to binary values (1 for reference base, 0 for main alternative base, np.nan for others).
@@ -136,7 +139,7 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
             combination_to_set_of_reads[combination_tuple].add(read)
 
     
-    itercol = bamfile_ps.pileup(contig=contig_name, start=start_pos, stop=stop_pos, truncate=True, min_base_quality=0, multiple_iterators=True, stepper="all")
+    itercol = bamfile_ps.pileup(contig=contig_name, start=start_pos, stop=stop_pos, truncate=True, min_base_quality=0, multiple_iterators=True, stepper="all", flag_filter=4 | 256 | 512 | 1024)
     matrices = {} #map of pileup matrices, one per combination of breakpoints
     list_of_suspicious_positions = {} #map of list of suspicious positions, one per combination of breakpoints
     for i in combination_to_set_of_reads.keys():
@@ -156,12 +159,12 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
 
             allreads = pileupcolumn.get_query_names()
             allbases_raw = [i.upper() for i in pileupcolumn.get_query_sequences(add_indels=True)]
+            refbase = reference_sequence[pileupcolumn.reference_pos].upper()
             
             unique, counts = np.unique(allbases_raw, return_counts=True)
             idx_sort = np.argsort(counts)
             counts = counts[idx_sort]
             unique = unique[idx_sort]
-            refbase = reference_sequence[pileupcolumn.reference_pos].upper()
 
             #compute the error rate of each read
             for read, base in zip(allreads, allbases_raw):
@@ -183,6 +186,14 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
                     allbases.append(a)
                 else:
                     allbases.append("".join([i for i in a if i in ['A','C','G','T','*']]))
+
+            #remove already called bases and replace them by the ref
+            if pileupcolumn.reference_pos in variants_already_called:
+                # If the position is already called, replace the base by the reference for those reads
+                for idx, read in enumerate(allreads):
+                    if read in variants_already_called[pileupcolumn.reference_pos]:
+                        allbases[idx] = refbase
+                
             tmp_dict = {}
             allbases_2 = []
             for i in range(len(allbases)):
@@ -198,29 +209,28 @@ def get_data(bamfile, originalAssembly, contig_name,start_pos,stop_pos, no_snp_t
             idx_sort = np.argsort(counts)
             unique = unique[idx_sort]
             counts = counts[idx_sort]
-
+        
+            # print("couoqn", counts)
 
             #if there is a base different from the reference, add the position to the list of suspicious positions or to obvious snps if it's really too obvious
             alternative_bases = set()
             for alt_b in range(len(unique)-1,-1,-1):
                 mean = max_error_rate_on_a_column * len(allbases_2)
                 std_dev = math.sqrt(max_error_rate_on_a_column * (1 - max_error_rate_on_a_column) *len(allbases_2))
-
                 if unique[alt_b] != refbase and unique[alt_b] != '' and counts[alt_b] >= 2 and 1 - stats.norm.cdf(counts[alt_b], loc=mean, scale=std_dev) < 0.001:  # Check if alternative bases are obviously a SNP
+                    # print(f"selecting obvious SNP at position {pileupcolumn.reference_pos} with base {unique[alt_b]} (count: {counts[alt_b]}), error rate and number of reads : ", max_error_rate_on_a_column, " * ", len(allbases_2))
                     obvious_snps[pileupcolumn.reference_pos] = set([allreads[row] for row in range(len(allreads)) if allbases[row] == unique[alt_b]])
                     alternative_bases.add(unique[alt_b])
-                elif unique[alt_b] != refbase and unique[alt_b] != '' and (counts[alt_b] > (1-no_snp_threshold)*len(tmp_dict) or (counts[alt_b] > 10 and alt_b != 0 and counts[alt_b] > 3*counts[alt_b-1])):
+                elif unique[alt_b] != refbase and unique[alt_b] != '' and counts[alt_b] > (1-no_snp_threshold)*len(tmp_dict) and len(alternative_bases) == 0 :
                     alternative_bases.add(unique[alt_b])
 
             #in tmp_dict, replace the refbase by 1 and the alternative base by 0, and the rest by np.nan
             if len(alternative_bases) > 0 :
                 for read in tmp_dict:
-                    if tmp_dict[read] == refbase:
-                        tmp_dict[read] = 1
-                    elif tmp_dict[read] in alternative_bases:
+                    if tmp_dict[read] in alternative_bases:
                         tmp_dict[read] = 0
                     else:
-                        tmp_dict[read] = np.nan
+                        tmp_dict[read] = 1
 
                 for combination in combination_to_set_of_reads.keys():
                     tmp_dict_comb = {}
@@ -352,7 +362,7 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
             for j in range(1, len(idx)):
                 col_i = submatrix[:, 0]
                 col_j = submatrix[:, j]
-                if np.sum(col_i != col_j) > 0.5 * number_reads:  # If more than 10% of rows differ
+                if np.sum(col_i != col_j) > 0.5 * number_reads:  # If more than 50% of rows differ
                     # Flip all bits in one of the columns to make them identical
                     submatrix[:, j] = 1 - submatrix[:, j]
                     toggled_columns[j] = True
@@ -389,45 +399,58 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
             corrected_number_of_loci = number_loci - (len(idx)-number_of_separated_columns)
             if nb_rows_0s == 2:
                 length_of_stretch = list_of_sus_pos[idx[-1]] - list_of_sus_pos[idx[0]]
-                corrected_number_of_loci = int( max_error_rate_of_reads * length_of_stretch )
+                corrected_number_of_loci = max(corrected_number_of_loci, int( max_error_rate_of_reads * length_of_stretch ))
 
             #now perform the statistical test if the obtained rectangle of 0s is significant
             p_value_of_the_column_cluster = statistical_test(nb_rows_0s, number_reads , number_of_separated_columns, corrected_number_of_loci, error_rate)
 
             #validate the snps if the p-value is significant
             if p_value_of_the_column_cluster < 0.001:
-                emblematic_snps.append(idx[0])
+                mean_snp_vector = np.mean(submatrix, axis=1)  # already computed above
+                emblematic_snps.append((idx, mean_snp_vector))
+
                 for idx_in_idx in range(len(idx)):
                     pos = idx[idx_in_idx]
                     # print("snp at ", list_of_sus_pos[i])
                     if toggled_columns[idx_in_idx]:
-                        snps_res[list_of_sus_pos[pos]] = set([list_of_reads[i] for i in list(np.where(row_means > 0.1)[0])])
+                        snps_res[list_of_sus_pos[pos]] = set([list_of_reads[i] for i in list(np.where(row_means > 0.5)[0])])
                     else:
                         snps_res[list_of_sus_pos[pos]] = set([list_of_reads[i] for i in list(np.where(row_means <= 0.1)[0])])
-                
-            # print("I found a rectangle of ", nb_rows_0s, " rows of 0s in a cluster of ", len(idx), " columns, among in total ", corrected_number_of_loci, " columns and ", number_reads, " rows with an error rate of ", error_rate, ", which gives a p-value of ", p_value_of_the_column_cluster, " (label ", label, ")")
-            # for i in range(len(idx)):
-            #     for j in range(number_reads):
-            #         print(int(submatrix[j,i]), end = '')
-            #     print(' : ', list_of_sus_pos[idx[i]])
-            
-            # print('')
+
+                # Example: If position 1612 is in the current rectangle, print a message
+                if 12169 in [list_of_sus_pos[idx[i]] for i in range(len(idx))]:
+                    print("Read names in rectangle:", [list_of_reads[j] for j in range(number_reads)])
+                    print("I found a rectangle of ", nb_rows_0s, " rows of 0s in a cluster of ", len(idx), " columns, among in total ", corrected_number_of_loci, " columns and ", number_reads, " rows with an error rate of ", error_rate, ", which gives a p-value of ", p_value_of_the_column_cluster, " (label ", label, ")")
+                    for i in range(len(idx)):
+                        for j in range(number_reads):
+                            print(int(submatrix[j,i]), end = '')
+                        print(' : ', list_of_sus_pos[idx[i]])
+                    print('')
 
                 # print("position ", list_of_sus_pos[i], " and reads ", set([list_of_reads[i] for i in list(np.where(row_means <= 0.1)[0])]))
 
 
-    #as a last step, recover the SNPs which correlate well with validated SNPs, using the already computed pvalues
+    #as a last step, recover the SNPs which correlate well with validated SNPs, using the mean SNP vector of each cluster
 
-    for i in emblematic_snps:
+    for idxs, mean_snp_vector in emblematic_snps:
         for j in range(number_loci):
             if list_of_sus_pos[j] not in snps_res:
-                pvalue = stats.chi2_contingency([[matrix_1_1[i,j],matrix_1_0[i,j]],[matrix_0_1[i,j],matrix_0_0[i,j]]])[1]
-                # if list_of_sus_pos[j] == 6105 or list_of_sus_pos[j] == 6105:
-                #     print([[matrix_1_1[i,j],matrix_1_0[i,j]],[matrix_0_1[i,j],matrix_0_0[i,j]]])
-                #     print("I am looking at the correlation of the SNP ", list_of_sus_pos[i], " with the SNP ", list_of_sus_pos[j], " which has a p-value of ", pvalue)
-                if pvalue < 0.001:
-                    snps_res[list_of_sus_pos[j]] = set([list_of_reads[alt_row] for alt_row in range(len(pileup)) if pileup_filled[alt_row,j]==0])
-
+                # Compute correlation between mean_snp_vector and column j
+                col_j = pileup_filled[:, j]
+                # Only consider rows without NaN in mean_snp_vector or col_j
+                valid_mask = ~np.isnan(mean_snp_vector) & ~np.isnan(col_j)
+                if np.sum(valid_mask) == 0:
+                    continue
+                pvalue = stats.chi2_contingency([[np.sum((mean_snp_vector[valid_mask] < 0.5) & (col_j[valid_mask] < 0.5)),
+                                                  np.sum((mean_snp_vector[valid_mask] < 0.5) & (col_j[valid_mask] >= 0.5))],
+                                                 [np.sum((mean_snp_vector[valid_mask] >= 0.5) & (col_j[valid_mask] < 0.5)),
+                                                  np.sum((mean_snp_vector[valid_mask] >= 0.5) & (col_j[valid_mask] >= 0.5))]])[1]
+                # # Debug print for specific position
+                # if list_of_sus_pos[j] == 12170:
+                #     print("I am looking at the correlation of the mean SNP vector with the SNP ", list_of_sus_pos[j], " and p-value ", pvalue)
+                # Rescue based on pvalue
+                if (pvalue < 0.001 / max(1, len(emblematic_snps)) or pvalue<0.000001)and np.sum(col_j[valid_mask] < 0.5) > 0:
+                    snps_res[list_of_sus_pos[j]] = set([list_of_reads[alt_row] for alt_row in range(len(pileup)) if pileup_filled[alt_row, j] == 0 and mean_snp_vector[alt_row] < 0.5])
     #return the list of validated snps
     return snps_res
 
@@ -453,6 +476,7 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
     #go through the variant positions, grouping positions if they are less than 5bp apart
     variantpositions = list(variants.keys())
     variantpositions.sort()
+    print("rererere ", variantpositions)
 
     index_pos_to_group = 0
     groups_of_variants = [] #tuple (start, end, (set) interesting_reads)
@@ -491,16 +515,21 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
         #go through the reads and inventory the alleles
         already_seen_name_in_the_column = set()
         for pileupread in pileupcolumn.pileups:
+
             name_of_read = pileupread.alignment.query_name
             while name_of_read in already_seen_name_in_the_column :
                name_of_read = name_of_read+"%"
             already_seen_name_in_the_column.add(name_of_read) 
-            if name_of_read.rstrip('%') in groups_of_variants[index_of_variant_group][2]:
+            if name_of_read.rstrip('%') in groups_of_variants[index_of_variant_group][2]: #only take the read where there are mutations
                 if name_of_read not in list_of_reads_there:
                     list_of_reads_there[name_of_read] = ""
                 if not pileupread.is_del:
                     insertion = max(0, pileupread.indel)
-                    list_of_reads_there[name_of_read] += pileupread.alignment.query_sequence[pileupread.query_position:pileupread.query_position+1+insertion]
+                    seq = pileupread.alignment.query_sequence[pileupread.query_position:pileupread.query_position+1+insertion]
+                    # Skip the read if it contains a letter that is not A, C, G, T
+                    if len(seq) == 1 and seq[0] not in "ACGT":
+                        continue
+                    list_of_reads_there[name_of_read] += seq
 
         if pileupcolumn.reference_pos == groups_of_variants[index_of_variant_group][1]-1: #exiting the group now, we can output the variants
             
@@ -519,8 +548,6 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
                 alleles['.'] = alleles['']
                 alleles.pop('')
 
-            #write the variants to the vcf file: the ref, the main alt and all the alts that are present in 5 reads or more
-            out.write(contig_name+'\t'+str(groups_of_variants[index_of_variant_group][0]+1)+'\t.\t'+reference_sequence+'\t')
             #sort the alleles by decreasing order of frequency
             alleles = {k: v for k, v in sorted(alleles.items(), key=lambda item: item[1], reverse = True)}
             # if 1308 <= groups_of_variants[index_of_variant_group][0] <= 1314:
@@ -532,20 +559,30 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
             count_first_allele = 0
 
             for al in alleles :
+                if al == reference_sequence :
+                    to_pop.add(al)
+                    continue
+
                 if first_allele:
                     count_first_allele = alleles[al]
                     first_allele = False
-                elif alleles[al] >= 15 and alleles[al] >= 0.25*count_first_allele :
+                elif alleles[al] >= 15 and alleles[al] >= 0.1*count_first_allele : #if allele is too secondary, don't output as variant
                     for al2 in alleles :
                         if alleles[al2] >= 5:
-
-                            if al != reference_sequence and al != al2 and alleles[al] < alleles[al2] and (al == "." or al in al2):
+                            if al != reference_sequence and al != al2 and alleles[al] < alleles[al2] and (al == "." or al in al2): #if included in more numerous allele, dont output (homopolymer errors :/)
                                 to_pop.add(al)
                 else:
                     to_pop.add(al)
 
             for i in to_pop:
                 alleles.pop(i)
+            
+            if len(alleles) == 0:
+                index_of_variant_group += 1
+                continue
+
+            #write the variants to the vcf file: the ref, the main alt and all the alts that are present in 5 reads or more
+            out.write(contig_name+'\t'+str(groups_of_variants[index_of_variant_group][0]+1)+'\t.\t'+reference_sequence+'\t')
 
             first_allele = True
             counts = []
@@ -565,8 +602,9 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
                     out.write(',')
                 out.write(str(counts[i]))
             out.write('\t.\n')
-        
+
             index_of_variant_group += 1
+        
 
     bamfile_ps.close()
     ref_file.close()
@@ -592,63 +630,79 @@ def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_t
     None
     """
      
-    list_of_sus_pos = []
-
-    #print(f'Parsing data on contig {contig_name} {start_pos}<->{end_pos}')
-    #time get_data
-    time_get_data = time.time()
-    list_of_matrices, list_of_list_of_suspicious_positions, obvious_snps, error_rates\
-         = get_data(bamfile, ref, contig_name,start_pos,end_pos, no_snp_threshold, max_error_on_column) #for each window you can have different groups of reads e.g. if some of them align with very big gaps; Here, the lists represent the different groups of reads
-    time_get_data2 = time.time() - time_get_data
-
-    # print(list_of_list_of_suspicious_positions, "uisofuo")
-
     all_variants = {} #map of position -> set of reads with alt alleles
-    time_call_variants = time.time()
-
-    for dict_of_sus_pos, list_of_sus_pos, error_rates_combination in zip(list_of_matrices, list_of_list_of_suspicious_positions, error_rates):
-
-        ###create a matrix from the columns
-        df = pd.DataFrame(dict_of_sus_pos) 
-        
-        # Debugging: Print the pileup at position 68803
-        # if 68803 in dict_of_sus_pos:
-        #     print(f"Pileup at position 68803: {''.join('*' if (v!=0 and v!=1) else str(int(v)) for v in dict_of_sus_pos[68803].values())}")
-        # df = df.dropna(axis=0, thresh=filtered_col_threshold * len(df.columns))  # Filter out rows (reads) with too many NaN values
-
-        ###clustering
-        if len(dict_of_sus_pos) > 0 :
-            pileup = df.to_numpy(dtype=float)
-            list_of_reads= df.index
-            time_call_variants = time.time()
-            variants_here = find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_on_column, error_rates_combination)
-
-            for pos in variants_here.keys():
-                if pos not in all_variants:
-                    all_variants[pos] = variants_here[pos]
-                else:
-                    all_variants[pos] = all_variants[pos].union(variants_here[pos])
-
-    # # Print obvious SNPs for debugging
-    # print("Obvious SNPs:")
-    # for pos, reads in obvious_snps.items():
-    #     print(f"Position: {pos}, Reads: {reads}")
-
-    # Merge obvious SNPs with less obvious SNPs
-    for pos, reads in obvious_snps.items():
-        if pos not in all_variants:
-            all_variants[pos] = reads
-
-    time_call_variants2 = time.time() - time_call_variants
+    number_of_new_variant_found = 1 #set to 1 to make it go through the loop
+    number_of_iterations = 0
+    time_get_data2 = 0
     time_output_vcf2 = 0
+    time_call_variants2 = 0
+
+    #do several iteration to unveil variant masked by other variants at the same position
+    while number_of_new_variant_found > 0:
+    
+        #print(f'Parsing data on contig {contig_name} {start_pos}<->{end_pos}')
+        number_of_new_variant_found = 0
+        number_of_iterations += 1
+        if number_of_iterations == 10:
+            #this is a complex region, even a bit weird, but whatever let's break
+            break
+
+        #time get_data
+        time_get_data = time.time()
+        list_of_matrices, list_of_list_of_suspicious_positions, obvious_snps, error_rates\
+                = get_data(bamfile, ref, contig_name,start_pos,end_pos, no_snp_threshold, max_error_on_column, all_variants) #for each window you can have different groups of reads e.g. if some of them align with very big gaps; Here, the lists represent the different groups of reads
+        time_get_data2 += time.time() - time_get_data
+        # # Print obvious SNPs for debugging
+        # print("Obvious SNPs:")
+        # for pos, reads in obvious_snps.items():
+        #     print(f"Position: {pos}, Reads: {reads}")
+
+        # print(list_of_list_of_suspicious_positions, "uisofuo")
+
+        time_call_variants = time.time()
+
+        for dict_of_sus_pos, list_of_sus_pos, error_rates_combination in zip(list_of_matrices, list_of_list_of_suspicious_positions, error_rates):
+
+            ###create a matrix from the columns
+            df = pd.DataFrame(dict_of_sus_pos) 
+            
+            # # Debugging: Print the pileup at position 68803
+            # if 36 in dict_of_sus_pos:
+            #     print(f"Pileup at position 68803: {''.join('*' if (v!=0 and v!=1) else str(int(v)) for v in dict_of_sus_pos[36].values())}")
+            # df = df.dropna(axis=0, thresh=filtered_col_threshold * len(df.columns))  # Filter out rows (reads) with too many NaN values
+            df = df.fillna(1) #na values are not defined, they should not help call variants
+
+            ###clustering
+            if len(dict_of_sus_pos) > 0 :
+                pileup = df.to_numpy(dtype=float)
+                list_of_reads= df.index
+                time_call_variants = time.time()
+                variants_here = find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_on_column, error_rates_combination)
+                number_of_new_variant_found = len(variants_here)
+                # print("new variants found: ", sorted(variants_here.keys()))
+                # sys.exit()
+
+                for pos in variants_here.keys():
+                    if pos not in all_variants:
+                        all_variants[pos] = variants_here[pos]
+                    else:
+                        all_variants[pos] = all_variants[pos].union(variants_here[pos])
+
+        # Merge obvious SNPs with less obvious SNPs
+        for pos, reads in obvious_snps.items():
+            if pos not in all_variants:
+                all_variants[pos] = reads
+
+        time_call_variants2 += time.time() - time_call_variants
+        time_output_vcf2 = 0
 
     ###append to the vcffile
     if len(all_variants) > 0 :
         time_output_vcf = time.time()
         output_VCF_of_this_window(bamfile, ref, all_variants, contig_name, vcf_file, benchmark)
-        time_output_vcf2 = time.time() - time_output_vcf 
+        time_output_vcf2 += time.time() - time_output_vcf 
 
-    print("On contig ", contig_name, " from ", start_pos, " to ", end_pos, "Times: get_data ", time_get_data2, " call_variants ", time_call_variants2, " output_vcf ", time_output_vcf2)
+    print("On contig ", contig_name, " from ", start_pos, " to ", end_pos, "Times: get_data ", int(time_get_data2), "s call_variants ", int(time_call_variants2), "s output_vcf ", int(time_output_vcf2), "s; in ", number_of_iterations, " iterations")
 
 def parse_arguments():
     """Parse the input arguments"""
@@ -720,7 +774,7 @@ if __name__ == '__main__':
         error_rate = mismatched_bases / total_bases
     else:
         error_rate = 0.1  # Fallback to default if no reads are found
-    print(f"Computed error rate from the bam file: {error_rate}.")
+    print(f"Computed error rate+divergence from the bam file: {error_rate}.")
 
     max_error_rate_on_column = max(0.1,min(error_rate*3, 0.5))
 
@@ -734,9 +788,10 @@ if __name__ == '__main__':
     contigs = bamfile_ps.header['SQ']
     bamfile_ps.close()
     
-    #mkdir out/tmp
-    if not os.path.exists(out+'/tmp'):
-        os.makedirs(out+'/tmp')
+    # Remove out/tmp if it exists, then recreate it
+    if os.path.exists(out + '/tmp'):
+        shutil.rmtree(out + '/tmp')
+    os.makedirs(out + '/tmp')
 
     tmp_dir = out+'/tmp'
 
@@ -797,9 +852,9 @@ if __name__ == '__main__':
     bamfile_ps.close()
 
     # Filter windows for contig_9843 encompassing position 35042
-    # windows_description = [window for window in windows_description if window[0] == 'contig_992' and window[1] <= 6111 < window[2]]
-    # print(windows_description)
-    # print("DEBUUUUUUG")
+    windows_description = [window for window in windows_description if window[0] == 'edge_349' and window[1] <= 12173 < window[2]]
+    print(windows_description)
+    print("DEBUUUUUUG")
 
     with ProcessPoolExecutor(max_workers=num_threads) as executor:
         futures = [executor.submit(call_variants_on_this_window, window[0], window[1], window[2], filtered_col_threshold, no_snp_threshold, bamfile, originalAssembly, window[3], max_error_rate_on_column, benchmark) for window in windows_description]
@@ -810,7 +865,7 @@ if __name__ == '__main__':
     for window in windows_description:
         if os.path.exists(window[3]):
             os.system('cat '+window[3]+' >> '+vcf_file)
-            os.remove(window[3])
+            # os.remove(window[3])
 
     #print the time now, and the total time taken
     print("["+time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())+"] Total time taken: ", time.time()-time_start)
