@@ -3,7 +3,7 @@ SNPsnoop
 Authors: Roland Faure, based on a previous program (strainminer) by Minh Tam Truong Khac
 """
 
-__version__ = '0.3.14'
+__version__ = '0.4.0'
 
 import pandas as pd 
 import numpy as np
@@ -332,7 +332,13 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
                 pvalues[i,j] = best_pvalue
                 pvalues[j,i] = best_pvalue
             else: #this is a bit between the two
-                pvalue = max(min(1,stats.chi2_contingency([[matrix_1_1[i,j],matrix_1_0[i,j]],[matrix_0_1[i,j],matrix_0_0[i,j]]])[1]), best_pvalue)
+                # Ensure no zero values in the contingency table
+                epsilon_chi = 1e-10
+                contingency = [
+                    [max(matrix_1_1[i,j], epsilon_chi), max(matrix_1_0[i,j], epsilon_chi)],
+                    [max(matrix_0_1[i,j], epsilon_chi), max(matrix_0_0[i,j], epsilon_chi)]
+                ]
+                pvalue = max(min(1,stats.chi2_contingency(contingency)[1]), best_pvalue)
                 pvalues[i,j] = pvalue
                 pvalues[j,i] = pvalue
                 # print("3 rrrrr", matrix_0_0[i,j],matrix_0_1[i,j],matrix_1_0[i,j],matrix_1_1[i,j], pvalue)
@@ -441,6 +447,7 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
                 valid_mask = ~np.isnan(mean_snp_vector) & ~np.isnan(col_j)
                 if np.sum(valid_mask) == 0:
                     continue
+                
                 pvalue = stats.chi2_contingency([[np.sum((mean_snp_vector[valid_mask] < 0.5) & (col_j[valid_mask] < 0.5)),
                                                   np.sum((mean_snp_vector[valid_mask] < 0.5) & (col_j[valid_mask] >= 0.5))],
                                                  [np.sum((mean_snp_vector[valid_mask] >= 0.5) & (col_j[valid_mask] < 0.5)),
@@ -476,7 +483,6 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
     #go through the variant positions, grouping positions if they are less than 5bp apart
     variantpositions = list(variants.keys())
     variantpositions.sort()
-    print("rererere ", variantpositions)
 
     index_pos_to_group = 0
     groups_of_variants = [] #tuple (start, end, (set) interesting_reads)
@@ -688,10 +694,10 @@ def call_variants_on_this_window(contig_name, start_pos, end_pos, filtered_col_t
                     else:
                         all_variants[pos] = all_variants[pos].union(variants_here[pos])
 
-        # Merge obvious SNPs with less obvious SNPs
-        for pos, reads in obvious_snps.items():
-            if pos not in all_variants:
-                all_variants[pos] = reads
+        # # Merge obvious SNPs with less obvious SNPs
+        # for pos, reads in obvious_snps.items():
+        #     if pos not in all_variants:
+        #         all_variants[pos] = reads
 
         time_call_variants2 += time.time() - time_call_variants
         time_output_vcf2 = 0
@@ -861,11 +867,54 @@ if __name__ == '__main__':
         for future in futures:
             future.result()
 
-    #concatenate all the vcf files in the order of the windows
+    # Rescue easy SNPs using longshot
+    longshot_vcf = tmp_dir + '/longshot.vcf'
+    longshot_cmd = f'longshot --bam {bamfile} --ref {originalAssembly} --out {longshot_vcf}'
+    print(f"Running longshot to rescue easy SNPs: {longshot_cmd}")
+    os.system(longshot_cmd)
+
+    #merge all VCFs
+    tmp_vcf = tmp_dir + '/tmp_merge.vcf'
+    # Format longshot VCF: keep first five columns, then add '.' and 'DP='
+    with open(longshot_vcf, 'r') as infile, open(tmp_vcf, 'w') as outfile:
+        for line in infile:
+            if not line.startswith('#'):
+                fields = line.strip().split('\t')
+                if len(fields) >= 5:
+                    # Write first five columns, then '.', then 'DP='
+                    outfile.write('\t'.join(fields[:5]) + '\t.\t'+ fields[7].split(';')[0] +'\n')
     for window in windows_description:
         if os.path.exists(window[3]):
-            os.system('cat '+window[3]+' >> '+vcf_file)
+            os.system('cat '+window[3]+' >> '+tmp_vcf )
             # os.remove(window[3])
+
+    # Sort tmp_vcf by key (CHROM, POS) and remove duplicate keys
+    sorted_vcf = out + '/variants.sorted.vcf'
+    seen_keys = set()
+    with open(tmp_vcf, 'r') as infile, open(sorted_vcf, 'w') as outfile:
+        header_lines = []
+        variant_lines = []
+        for line in infile:
+            if line.startswith('#'):
+                header_lines.append(line)
+            else:
+                fields = line.strip().split('\t')
+                if len(fields) > 1:
+                    key = (fields[0], fields[1])
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        variant_lines.append(line)
+        # Write header
+        for h in header_lines:
+            outfile.write(h)
+        # Sort variant lines by CHROM and POS
+        variant_lines.sort(key=lambda x: (x.split('\t')[0], int(x.split('\t')[1])))
+        for v in variant_lines:
+            outfile.write(v)
+    print(f"Sorted and deduplicated VCF written to {sorted_vcf}")
+
+    # Concatenate sorted VCF to main VCF file using cat
+    os.system(f"cat {sorted_vcf} >> {vcf_file}")
 
     #print the time now, and the total time taken
     print("["+time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())+"] Total time taken: ", time.time()-time_start)
