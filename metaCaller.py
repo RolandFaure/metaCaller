@@ -857,10 +857,10 @@ if __name__ == '__main__':
 
     bamfile_ps.close()
 
-    # # Filter windows for contig_9843 encompassing position 35042
-    # windows_description = [window for window in windows_description if window[0] == 'edge_349' and window[1] <= 12173 < window[2]]
-    # print(windows_description)
-    # print("DEBUUUUUUG")
+    # Filter windows for contig_9843 encompassing position 35042
+    windows_description = [window for window in windows_description if window[0] == 'edge_349' and window[1] <= 12173 < window[2]]
+    print(windows_description)
+    print("DEBUUUUUUG")
 
     with ProcessPoolExecutor(max_workers=num_threads) as executor:
         futures = [executor.submit(call_variants_on_this_window, window[0], window[1], window[2], filtered_col_threshold, no_snp_threshold, bamfile, originalAssembly, window[3], max_error_rate_on_column, benchmark) for window in windows_description]
