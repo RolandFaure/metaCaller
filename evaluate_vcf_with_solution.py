@@ -813,20 +813,25 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, solution_known = False):
     with open(base_counts_pickle_file, "rb") as pkl_in:
         base_counts = pickle.load(pkl_in)
     print(f"Base counts loaded from {base_counts_pickle_file}")
-
     # Initialize statistics for each caller
     caller_stats = {}
     total_number_of_true_variants = 0
+    total_number_of_true_variants_per_contig = {}
     hist_cov_correctly_called_snpsnoop = [0 for i in range(100)]
     hist_cov_false_positive_snpsnoop = [0 for i in range(100)]
     hist_cov_false_negative_snpsnoop = [0 for i in range(100)]
     variants_called_by_both_tools = 0
     variant_called_by_only_snspnoop = set()
     variant_called_by_only_bcftools = set()
+    true_variant_called = set()
+
+    # Per-contig statistics
+    contig_stats = {}
+
     for variant_key, variant_info in variants.items():
         contig, pos = variant_key
-        if pos > 100000:
-            continue
+        # if pos > 100000:
+        #     continue
         ref_base = variant_info[("ref", 0)]
         found_variant = False
         for caller_and_depth, alt_base in variant_info.items():
@@ -841,35 +846,38 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, solution_known = False):
                 continue
             caller_stats[caller]["total"] += 1
 
+            # Initialize per-contig stats for this caller
+            if contig not in contig_stats:
+                contig_stats[contig] = {}
+                total_number_of_true_variants_per_contig[contig] = 0
+            if caller not in contig_stats[contig]:
+                contig_stats[contig][caller] = {"recall": 0, "false_positives": 0, "total": 0}
+
+            contig_stats[contig][caller]["total"] += 1
+
             # Check if the base is seen in the pileup
             if variant_key in base_counts:
-
                 counts = base_counts[variant_key]
                 if counts[alt_base] > 0:
                     caller_stats[caller]["recall"] += 1
+                    contig_stats[contig][caller]["recall"] += 1
                     found_variant = True 
-                    # if not any(caller == "snpsnoop_normalized.vcf" or caller == "trash.vcf" for caller, _ in variant_info.keys()):
-                    #     if depth > 30 or True:
-                    #         print("Missing snp : ", variant_key, " ", variant_info, ", DP in other caller: ", depth)
-                        # hist_cov_correctly_called_snpsnoop[min(99,np.sum(list(counts.values())))] += 1
-                    # elif caller == "bcfcalls_normalized.vcf":
-                    #     hist_cov_false_negative_snpsnoop[min(99,depth)] += 1
-
+                    if variant_key not in true_variant_called:
+                        true_variant_called.add(variant_key)
+                        total_number_of_true_variants += 1
+                        total_number_of_true_variants_per_contig[contig] += 1
                 else:
                     caller_stats[caller]["false_positives"] += 1
+                    contig_stats[contig][caller]["false_positives"] += 1
                     hist_cov_false_positive_snpsnoop[min(99,depth)] += 1
                     if caller == "snpsnoop_normalized.vcf" and "bcfcalls_normalized.vcf" not in [i[0] for i in variant_info.keys()]:
-                        print("not in bcftools ", variant_key, " ", variant_info, " ", counts)
+                        # print("not in bcftools ", variant_key, " ", variant_info, " ", counts)
                         variant_called_by_only_snspnoop.add((variant_key, alt_base))
                     elif caller == "bcfcalls_normalized.vcf" and "snpsnoop_normalized.vcf" not in [i[0] for i in variant_info.keys()]:
-                        print("not in snpsnoop ", variant_key, " ", variant_info, " ", counts)
+                        # print("not in snpsnoop ", variant_key, " ", variant_info, " ", counts)
                         variant_called_by_only_bcftools.add((variant_key, alt_base))
                     elif caller == "bcfcalls_normalized.vcf":
                         variants_called_by_both_tools+=1
-                    # if caller == "snpsnoop_normalized.vcf" and not any(c == "bcfcalls_normalized" for c, _ in variant_info.keys()):
-
-        if found_variant:
-            total_number_of_true_variants += 1
 
     if solution_known:
         # Identify true variants from HiFi pileup: record positions with no consensus
@@ -903,40 +911,84 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, solution_known = False):
             
             print(f"Number of false negatives for {caller}: {false_negatives}")
 
-    # Print statistics for each caller
-    for caller, stats in caller_stats.items():
-        recall = stats["recall"] / total_number_of_true_variants
-        false_positive_rate = stats["false_positives"] / (stats["recall"]+stats["false_positives"] )
+
+    # Print per-contig statistics
+    # Aggregate statistics across all contigs for each caller
+    for caller in caller_stats:
+        total_recall = caller_stats[caller]["recall"]
+        total_fp = caller_stats[caller]["false_positives"]
         print(f"Caller: {caller}")
-        print(f"  Recall: {recall:.2%}")
-        print(f"  False Positive Rate: {false_positive_rate:.2%}")
-        print(f"  Total Variants: {stats['total']}")
-        print(f"  True Positives: {stats['recall']}")
-        print(f"  False Positives: {stats['false_positives']}")
-        print("-" * 40)
-    print("Variagnd  dsfkl : ", variants_called_by_both_tools, " ", len(variant_called_by_only_bcftools), " ", len(variant_called_by_only_snspnoop))
+        print(f"  Recall: {total_recall}/{total_number_of_true_variants} ({(total_recall/total_number_of_true_variants):.3f})")
+        print(f'  False Positives: {total_fp} ({(total_fp/caller_stats[caller]["total"] if caller_stats[caller]["total"] > 0 else 0):.3f})')
+        print("-" * 30)
 
-    # Output variants called only by bcftools and only by snpsnoop as pickles
-    with open(os.path.join(tmp_dir, "only_bcftools_variants.pkl"), "wb") as f:
-        pickle.dump(list(variant_called_by_only_bcftools), f)
-    with open(os.path.join(tmp_dir, "only_snpsnoop_variants.pkl"), "wb") as f:
-        pickle.dump(list(variant_called_by_only_snspnoop), f)
+    # Aggregate statistics across all callers and contigs
+    print("\nAggregated statistics across all callers (sum over contigs):")
+    for caller in caller_stats:
+        total_recall = 0
+        total_fp = 0
+        total_called = 0
+        total_true_pos = 0
+        for contig in contig_stats:
+            # Skip contigs where DeepVariant or MetaCaller have 0 recall
+            if caller in contig_stats[contig]:
+                if ("deepvariant_normalized.vcf" not in contig_stats[contig] or contig_stats[contig]["deepvariant_normalized.vcf"]["recall"] == 0) \
+                    or ("metacaller_normalized.vcf" not in contig_stats[contig] or contig_stats[contig]["metacaller_normalized.vcf"]["recall"] == 0):
+                    continue
+                total_recall += contig_stats[contig][caller]["recall"]
+                total_fp += contig_stats[contig][caller]["false_positives"]
+                total_called += contig_stats[contig][caller]["total"]
+                total_true_pos += total_number_of_true_variants_per_contig[contig]
+        recall_rate = total_recall / total_true_pos if total_true_pos > 0 else 0
+        fp_rate = total_fp / total_called if total_called > 0 else 0
+        print(f"Caller: {caller}")
+        print(f"  Recall: {total_recall}/{total_true_pos} ({recall_rate:.3f})")
+        print(f"  False Positives: {total_fp}/{total_called} ({fp_rate:.3f})")
+        print("-" * 30)
 
-    # Plot histograms for SNP-Snoop
-    x = np.arange(100)
+    # After printing aggregated statistics, plot recall of metacaller vs recall of deepvariant as a scatter plot
+    # Plot recall of metacaller vs deepvariant per contig as a scatter plot
+    metacaller_key = "metacaller_normalized.vcf"
+    deepvariant_key = "deepvariant_normalized.vcf"
+    if metacaller_key in caller_stats and deepvariant_key in caller_stats:
+        metacaller_recalls = []
+        deepvariant_recalls = []
+        number_of_variants = []
+        contig_names = []
+        for contig in contig_stats:
+            if total_number_of_true_variants_per_contig[contig] > 0:
+                meta_recall = contig_stats[contig].get(metacaller_key, {}).get("recall", 0) / total_number_of_true_variants_per_contig[contig]
+                deep_recall = contig_stats[contig].get(deepvariant_key, {}).get("recall", 0) / total_number_of_true_variants_per_contig[contig]
+                number_of_variants.append(total_number_of_true_variants_per_contig[contig])
+                metacaller_recalls.append(meta_recall)
+                deepvariant_recalls.append(deep_recall)
+                contig_names.append(contig)
+        # Determine point sizes based on the number of variants per contig
+        point_sizes = []
+        for n in number_of_variants:
+            if n < 10:
+                point_sizes.append(30)
+            elif n < 100:
+                point_sizes.append(60)
+            elif n < 1000:
+                point_sizes.append(120)
+            else:
+                point_sizes.append(200)
 
-    plt.figure(figsize=(12, 6))
-    # plt.bar(x - 0.3, hist_cov_correctly_called_snpsnoop, width=0.3, label="Correctly Called", color="green")
-    plt.bar(x, hist_cov_false_positive_snpsnoop, width=0.3, label="False Positives", color="red")
-    plt.bar(x + 0.3, hist_cov_false_negative_snpsnoop, width=0.3, label="False Negatives", color="blue")
-
-    plt.xlabel("Coverage")
-    plt.ylabel("Frequency")
-    plt.title("Coverage Histogram for SNP-Snoop Variants")
-    plt.legend()
-    plt.grid(axis="y", linestyle="--", alpha=0.7)
-    plt.tight_layout()
-    plt.show()
+        plt.figure(figsize=(8, 6))
+        plt.scatter(metacaller_recalls, deepvariant_recalls, s=point_sizes, color='blue', alpha=0.7)
+        for i, name in enumerate(contig_names):
+            plt.annotate(name, (metacaller_recalls[i], deepvariant_recalls[i]), fontsize=8)
+        plt.xlabel("Recall of MetaCaller (per contig)")
+        plt.ylabel("Recall of DeepVariant (per contig)")
+        plt.title("Recall: MetaCaller vs DeepVariant (per contig)")
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+    else:
+        print("MetaCaller or DeepVariant statistics not found for per-contig scatter plot.")
 
 
 if __name__ == "__main__":
@@ -1019,10 +1071,10 @@ if __name__ == "__main__":
         #     print("Mapping HiFi reads failed:", command)
         #     sys.exit(1)
 
-        # compare_calls_with_HiFi(args.vcf, mapped_reads_bam, solution_known=False)
+        compare_calls_with_HiFi(args.vcf, mapped_reads_bam, solution_known=False)
         # Output all potential k-mers represented by the VCF
-        output_all_potential_kmers_represented_by_the_VCF(args.vcf, args.ref, os.path.join(tmp_dir, "kmers_to_check.fa"), args.length)
-        print("Outputted all variants as k-mers")
+        # output_all_potential_kmers_represented_by_the_VCF(args.vcf, args.ref, os.path.join(tmp_dir, "kmers_to_check.fa"), args.length)
+        # print("Outputted all variants as k-mers")
 
 
 

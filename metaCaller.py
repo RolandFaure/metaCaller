@@ -3,7 +3,7 @@ SNPsnoop
 Authors: Roland Faure, based on a previous program (strainminer) by Minh Tam Truong Khac
 """
 
-__version__ = '0.3.14'
+__version__ = '0.3.15'
 
 import pandas as pd 
 import numpy as np
@@ -332,7 +332,8 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
                 pvalues[i,j] = best_pvalue
                 pvalues[j,i] = best_pvalue
             else: #this is a bit between the two
-                pvalue = max(min(1,stats.chi2_contingency([[matrix_1_1[i,j],matrix_1_0[i,j]],[matrix_0_1[i,j],matrix_0_0[i,j]]])[1]), best_pvalue)
+                epsilon = 0.000001
+                pvalue = max(min(1,stats.chi2_contingency([[matrix_1_1[i,j]+epsilon,matrix_1_0[i,j]+epsilon],[matrix_0_1[i,j]+epsilon,matrix_0_0[i,j]+epsilon]])[1]), best_pvalue)
                 pvalues[i,j] = pvalue
                 pvalues[j,i] = pvalue
                 # print("3 rrrrr", matrix_0_0[i,j],matrix_0_1[i,j],matrix_1_0[i,j],matrix_1_1[i,j], pvalue)
@@ -441,10 +442,11 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
                 valid_mask = ~np.isnan(mean_snp_vector) & ~np.isnan(col_j)
                 if np.sum(valid_mask) == 0:
                     continue
-                pvalue = stats.chi2_contingency([[np.sum((mean_snp_vector[valid_mask] < 0.5) & (col_j[valid_mask] < 0.5)),
-                                                  np.sum((mean_snp_vector[valid_mask] < 0.5) & (col_j[valid_mask] >= 0.5))],
-                                                 [np.sum((mean_snp_vector[valid_mask] >= 0.5) & (col_j[valid_mask] < 0.5)),
-                                                  np.sum((mean_snp_vector[valid_mask] >= 0.5) & (col_j[valid_mask] >= 0.5))]])[1]
+                epsilon = 0.0000001
+                pvalue = stats.chi2_contingency([[np.sum((mean_snp_vector[valid_mask] < 0.5) & (col_j[valid_mask] < 0.5)) + epsilon,
+                                                  np.sum((mean_snp_vector[valid_mask] < 0.5) & (col_j[valid_mask] >= 0.5))+ epsilon],
+                                                 [np.sum((mean_snp_vector[valid_mask] >= 0.5) & (col_j[valid_mask] < 0.5))+ epsilon,
+                                                  np.sum((mean_snp_vector[valid_mask] >= 0.5) & (col_j[valid_mask] >= 0.5))+ epsilon]])[1]
                 # # Debug print for specific position
                 # if list_of_sus_pos[j] == 12170:
                 #     print("I am looking at the correlation of the mean SNP vector with the SNP ", list_of_sus_pos[j], " and p-value ", pvalue)
@@ -476,7 +478,6 @@ def output_VCF_of_this_window(bamfile, originalAssembly, variants, contig_name, 
     #go through the variant positions, grouping positions if they are less than 5bp apart
     variantpositions = list(variants.keys())
     variantpositions.sort()
-    print("rererere ", variantpositions)
 
     index_pos_to_group = 0
     groups_of_variants = [] #tuple (start, end, (set) interesting_reads)
