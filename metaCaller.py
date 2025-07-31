@@ -424,15 +424,15 @@ def find_SNPs_in_this_window(pileup, list_of_sus_pos, list_of_reads, max_error_o
                     else:
                         snps_res[list_of_sus_pos[pos]] = set([list_of_reads[i] for i in list(np.where(row_means <= 0.1)[0])])
 
-                # Example: If position 1612 is in the current rectangle, print a message
-                if 12169 in [list_of_sus_pos[idx[i]] for i in range(len(idx))]:
-                    print("Read names in rectangle:", [list_of_reads[j] for j in range(number_reads)])
-                    print("I found a rectangle of ", nb_rows_0s, " rows of 0s in a cluster of ", len(idx), " columns, among in total ", corrected_number_of_loci, " columns and ", number_reads, " rows with an error rate of ", error_rate, ", which gives a p-value of ", p_value_of_the_column_cluster, " (label ", label, ")")
-                    for i in range(len(idx)):
-                        for j in range(number_reads):
-                            print(int(submatrix[j,i]), end = '')
-                        print(' : ', list_of_sus_pos[idx[i]])
-                    print('')
+                # # Example: If position 1612 is in the current rectangle, print a message
+                # if 12169 in [list_of_sus_pos[idx[i]] for i in range(len(idx))]:
+                #     print("Read names in rectangle:", [list_of_reads[j] for j in range(number_reads)])
+                #     print("I found a rectangle of ", nb_rows_0s, " rows of 0s in a cluster of ", len(idx), " columns, among in total ", corrected_number_of_loci, " columns and ", number_reads, " rows with an error rate of ", error_rate, ", which gives a p-value of ", p_value_of_the_column_cluster, " (label ", label, ")")
+                #     for i in range(len(idx)):
+                #         for j in range(number_reads):
+                #             print(int(submatrix[j,i]), end = '')
+                #         print(' : ', list_of_sus_pos[idx[i]])
+                #     print('')
 
                 # print("position ", list_of_sus_pos[i], " and reads ", set([list_of_reads[i] for i in list(np.where(row_means <= 0.1)[0])]))
 

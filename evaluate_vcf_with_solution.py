@@ -13,6 +13,8 @@ import random
 import pysam
 import glob
 import matplotlib.pyplot as plt
+import scipy.stats as stats
+
 
 
 def reverse_complement(seq):
@@ -747,13 +749,15 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, false_positive_SNPs_file=
     caller_stats = {}
     total_number_of_true_variants = 0
     total_number_of_true_variants_per_contig = {}
-    hist_cov_correctly_called_snpsnoop = [0 for i in range(100)]
-    hist_cov_false_positive_snpsnoop = [0 for i in range(100)]
-    hist_cov_false_negative_snpsnoop = [0 for i in range(100)]
+    alt_per_contig = {}
+    tot_per_contig = {}
     variants_called_by_both_tools = 0
     variant_called_by_only_snspnoop = set()
     variant_called_by_only_bcftools = set()
     true_variant_called = set()
+    hist_metacaller_not_deepvariant = list()
+    hist_deepvariant_not_metacaller = list()
+    hist_all_variants = list()
 
     # Per-contig statistics
     contig_stats = {}
@@ -763,6 +767,17 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, false_positive_SNPs_file=
         if variant_key not in base_counts:
             # print("variant ker ", variant_key, variant_info)
             continue
+
+        # # Skip this variant if all callers have allele count too low => to test what kind of snps are detected by what kind of callers
+        # allele_counts = []
+        # for caller_and_depth, alt_base in variant_info.items():
+        #     if caller_and_depth[0] == "ref":
+        #         continue
+        #     if alt_base == "*" or alt_base == "N":
+        #         continue
+        #     allele_counts.append(caller_and_depth[1])
+        # if allele_counts and all(ac <= 5 for ac in allele_counts):
+        #     continue
 
         ref_base = variant_info[("ref", 0)]
         found_variant = False
@@ -789,7 +804,9 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, false_positive_SNPs_file=
 
             # Check if the base is seen in the pileup
             if variant_key in base_counts:
+                
                 counts = base_counts[variant_key]
+                depth_total = sum(counts.values())
                 if counts[alt_base] > 0:
                     caller_stats[caller]["recall"] += 1
                     contig_stats[contig][caller]["recall"] += 1
@@ -798,18 +815,27 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, false_positive_SNPs_file=
                         true_variant_called.add(variant_key)
                         total_number_of_true_variants += 1
                         total_number_of_true_variants_per_contig[contig] += 1
-                else:
+                        if caller == "bcfcalls_normalized.vcf":
+                            if contig not in alt_per_contig:
+                                tot_per_contig[contig] = 0
+                                alt_per_contig[contig] = 0
+                            alt_per_contig[contig] += depth
+                            tot_per_contig[contig] += 1
+
+
+                    if caller == "metacaller_normalized.vcf" :
+                        hist_all_variants.append(float(depth)/depth_total)
+                    if caller == "metacaller_normalized.vcf" and "deepvariant_normalized.vcf" not in [i[0] for i in variant_info.keys()]:
+                        hist_metacaller_not_deepvariant.append(float(depth)/depth_total)
+                    elif caller == "deepvariant_normalized.vcf" and "metacaller_normalized.vcf" not in [i[0] for i in variant_info.keys()]:
+                        hist_deepvariant_not_metacaller.append(float(depth)/depth_total)
+                        if "contig_10" in variant_key[0]:  
+                            print("deepvariant not metacaller: ", variant_key, " ", variant_info, " ", float(depth)/depth_total, " ", depth_total)
+
+                        
+                elif counts[alt_base] == 0:
                     caller_stats[caller]["false_positives"] += 1
                     contig_stats[contig][caller]["false_positives"] += 1
-                    hist_cov_false_positive_snpsnoop[min(99,depth)] += 1
-                    if caller == "metacaller_normalized.vcf" and "deepvariant_normalized.vcf" not in [i[0] for i in variant_info.keys()]:
-                        print("not in deepvariant ", variant_key, " ", variant_info, " ", counts)
-                        variant_called_by_only_snspnoop.add((variant_key, alt_base))
-                    elif caller == "deepvariant_normalized.vcf" and "metacaller_normalized.vcf" not in [i[0] for i in variant_info.keys()]:
-                        print("not in metacaller ", variant_key, " ", variant_info, " ", counts)
-                        variant_called_by_only_bcftools.add((variant_key, alt_base))
-                    elif caller == "deepvariant_normalized.vcf":
-                        variants_called_by_both_tools+=1
        
                     # Output false positive SNPs to file if not already outputted
                     false_positive_SNPs_file = "false_positives.vcf"
@@ -820,16 +846,14 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, false_positive_SNPs_file=
                         with open(false_positive_SNPs_file, "a") as fp_out:
                             fp_out.write(f"{contig}\t{pos+1}\t.\t{ref_base}\t{alt_base}\t.\t.\tCALLER={callers_str}\n")
                         already_outputted_false_positives.add(false_positive_key)
-
-        if found_variant:
-            total_number_of_true_variants += 1
+                
 
     if solution_known:
         # Identify true variants from HiFi pileup: record positions with no consensus
         true_variants = []
         for (contig, pos), counts in base_counts.items():
-            if pos > 100000 : 
-                continue
+            # if pos > 100000 : 
+            #     continue
             total = sum(counts[base] for base in "ATCG")
             if total == 0:
                 continue
@@ -856,7 +880,6 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, false_positive_SNPs_file=
             
             print(f"Number of false negatives for {caller}: {false_negatives}")
 
-
     # Print per-contig statistics
     # Aggregate statistics across all contigs for each caller
     for caller in caller_stats:
@@ -877,8 +900,9 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, false_positive_SNPs_file=
         for contig in contig_stats:
             # Skip contigs where DeepVariant or MetaCaller have 0 recall
             if caller in contig_stats[contig]:
-                if ("deepvariant_normalized.vcf" not in contig_stats[contig] or contig_stats[contig]["deepvariant_normalized.vcf"]["recall"] == 0) \
-                    or ("metacaller_normalized.vcf" not in contig_stats[contig] or contig_stats[contig]["metacaller_normalized.vcf"]["recall"] == 0):
+                if "deepvariant_normalized.vcf" not in contig_stats[contig] or contig_stats[contig]["deepvariant_normalized.vcf"]["recall"] == 0 \
+                    or "metacaller_normalized.vcf" not in contig_stats[contig] or contig_stats[contig]["metacaller_normalized.vcf"]["recall"] == 0 \
+                    or "bcfcalls_normalized.vcf" not in contig_stats[contig] or contig_stats[contig]["bcfcalls_normalized.vcf"]["recall"] == 0:
                     continue
                 total_recall += contig_stats[contig][caller]["recall"]
                 total_fp += contig_stats[contig][caller]["false_positives"]
@@ -900,14 +924,24 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, false_positive_SNPs_file=
         deepvariant_recalls = []
         number_of_variants = []
         contig_names = []
+        coverages = []
+        recall_ratios = []
         for contig in contig_stats:
             if total_number_of_true_variants_per_contig[contig] > 0:
+                if "deepvariant_normalized.vcf" not in contig_stats[contig] or contig_stats[contig]["deepvariant_normalized.vcf"]["recall"] == 0 \
+                    or "metacaller_normalized.vcf" not in contig_stats[contig] or contig_stats[contig]["metacaller_normalized.vcf"]["recall"] == 0 :
+                    continue
                 meta_recall = contig_stats[contig].get(metacaller_key, {}).get("recall", 0) / total_number_of_true_variants_per_contig[contig]
                 deep_recall = contig_stats[contig].get(deepvariant_key, {}).get("recall", 0) / total_number_of_true_variants_per_contig[contig]
+                cov = min(20, alt_per_contig.get(contig, 0) / tot_per_contig.get(contig, 1))
+                coverages.append(cov)
                 number_of_variants.append(total_number_of_true_variants_per_contig[contig])
                 metacaller_recalls.append(meta_recall)
                 deepvariant_recalls.append(deep_recall)
                 contig_names.append(contig)
+                # Avoid division by zero
+                recall_ratio = meta_recall - deep_recall
+                recall_ratios.append(recall_ratio)
         # Determine point sizes based on the number of variants per contig
         point_sizes = []
         for n in number_of_variants:
@@ -920,18 +954,59 @@ def compare_calls_with_HiFi(all_variants, mapped_hifi, false_positive_SNPs_file=
             else:
                 point_sizes.append(200)
 
+        # First plot: recall scatter
         plt.figure(figsize=(8, 6))
-        plt.scatter(metacaller_recalls, deepvariant_recalls, s=point_sizes, color='blue', alpha=0.7)
+        scatter = plt.scatter(
+            metacaller_recalls,
+            deepvariant_recalls,
+            s=point_sizes,
+            c=coverages,
+            cmap='viridis',
+            alpha=0.7
+        )
         for i, name in enumerate(contig_names):
             plt.annotate(name, (metacaller_recalls[i], deepvariant_recalls[i]), fontsize=8)
         plt.xlabel("Recall of MetaCaller (per contig)")
-        plt.ylabel("Recall of DeepVariant (per contig)")
-        plt.title("Recall: MetaCaller vs DeepVariant (per contig)")
+        plt.ylabel("Recall of deepvariant (per contig)")
+        plt.title("Recall: MetaCaller vs deepvariant (per contig)")
         plt.xlim(0, 1)
         plt.ylim(0, 1)
         plt.grid(True)
+        plt.colorbar(scatter, label="Coverage (alt/true variants)")
         plt.tight_layout()
         plt.show()
+
+        # Second plot: normalized histograms of depth for unique variants
+        plt.figure(figsize=(10, 6))
+        bins = np.linspace(0, 1, 101)
+
+        # Histogram: DeepVariant not MetaCaller (blue, mirrored below x-axis)
+        deep_hist, deep_bins = np.histogram(hist_deepvariant_not_metacaller, bins=bins)
+        # Plot DeepVariant not MetaCaller histogram (blue, mirrored below x-axis)
+        plt.bar(
+            (deep_bins[:-1] + deep_bins[1:]) / 2,
+            -deep_hist,
+            width=(deep_bins[1] - deep_bins[0]),
+            color="blue",
+            label="DeepVariant not MetaCaller"
+        )
+
+        # Histogram: MetaCaller not DeepVariant (orange)
+        plt.hist(
+            hist_metacaller_not_deepvariant,
+            bins=bins,
+            color="orange",
+            label="MetaCaller not DeepVariant"
+        )
+
+        plt.xlabel("Coverage of the variants")
+        plt.ylabel("Number of variants")
+        plt.title("Distribution of SNPs called only by metacaller or only deepvariant by coverage")
+        plt.legend()
+        plt.axhline(0, color="black", linewidth=1)
+        plt.tight_layout()
+        plt.show()
+
     else:
         print("MetaCaller or DeepVariant statistics not found for per-contig scatter plot.")
 
